@@ -1,7 +1,14 @@
-[package]
-name = "PodWeaver"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver="2"
+members = [
+    "apps/*",
+    "crates/*", 
+]
 
-[dependencies]
-tokio = "1.53.1"
+[workspace.package]
+version = "0.1.0"
+edition = "2026"
+authors = ["DotBox"]
+
+[workspace.dependencies]
+thiserror = { version = "2.0.20" }
