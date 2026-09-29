@@ -1,18 +1,13 @@
 mod bencode;
 mod error;
 
+use std::fs;
 use sha2::{Sha256, Digest};
-use crate::{metainfo::{error::*, bencode::*}, types::InfoHash};
-use std::{io::{Read, BufReader}, collections::BTreeMap, fs};
+use std::io::{Read, BufReader};
+use std::collections::BTreeMap;
 
-pub struct MetainfoFields {
-    pub author: Option<String>,
-    pub creation_date: Option<String>,
-    pub comments: Option<String>,
-    pub filename: String,
-    pub total_length: u64,
-    pub piece_length: u32,
-}
+use crate::metainfo::{error::*, bencode::*};
+use crate::types::InfoHash;
 
 pub struct MetaInfo {
     pub author: Option<String>,
@@ -30,8 +25,13 @@ pub struct Info {
 
 impl MetaInfo {
 
-    pub fn new(field_info: MetainfoFields) -> Result<Self> {
-        let filepath = field_info.filename;
+    pub fn new(
+        author: Option<String>,
+        creation_date : Option<String>,
+        comments: Option<String>,
+        filename: &str
+    ) -> Result<Self> {
+        let filepath = filename;
         let metadata = fs::metadata(&filepath)?;
         let file_size = metadata.len();
 
@@ -54,12 +54,12 @@ impl MetaInfo {
         if hash_pieces.len() != num_pieces as usize { return Err(Error::IncompletePieces); }
 
         let metainfo = MetaInfo {
-            author: field_info.author,
-            creation_date: field_info.creation_date,
-            comments: field_info.comments,
+            author: author,
+            creation_date: creation_date,
+            comments: comments,
             info: Info {
                 pieces: hash_pieces,
-                filename: filepath,
+                filename: filepath.to_string(),
                 total_length: file_size,
                 piece_length: piece_len_bytes as u32,
             }
