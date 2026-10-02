@@ -1,17 +1,18 @@
 mod node;
 mod contact;
 mod routing;
-pub mod krpc;
+mod krpc;
+mod pending_map;
 
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use krpc::*;
 use contact::*;
 use routing::*;
-use crate::dht::krpc::KRPCMessage;
-use crate::error::*;
-use crate::runtime::pending_map::*;
-use crate::types::TransactionID;
+use pending_map::*;
+use super::error::*;
+use super::types::TransactionID;
 
 pub struct DHT {
     pub contact: Arc<Contact>,

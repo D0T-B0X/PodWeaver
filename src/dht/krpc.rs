@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use crate::types::*;
 use crate::error::*;
-use crate::metainfo::bencode::*;
+use crate::weft::bencode::*;
 
 pub enum QueryPayload {
     Ping { id: NodeID },
