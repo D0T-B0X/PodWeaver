@@ -1,8 +1,8 @@
 use std::sync::{Mutex, Arc};
 
-use crate::node::*;
 use crate::error::*;
 use crate::types::*;
+use crate::dht::node::*;
 
 const K: u8 = 20;
 const BIT_SPACE: usize = 256;
@@ -71,7 +71,7 @@ impl RoutingTable {
 
         let mut it = 1;
         while closest_nodes.len() < node_count && (closest_bucket > it || closest_bucket + it < BIT_SPACE) {
-            if it < closest_bucket {
+            if it <= closest_bucket {
                 closest_nodes.extend(self.buckets[closest_bucket - it].nodes.iter().cloned());
             }
             

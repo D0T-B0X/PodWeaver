@@ -1,37 +1,55 @@
 use std::collections::BTreeMap;
-use thiserror::Error;
+
+use crate::error::*;
+use crate::types::*;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub enum BencodeMap<'a> {
+pub enum BencodeMap {
     Integer(i64),
-    ByteString(&'a [u8]),
-    List(Vec<BencodeMap<'a>>),
-    Dict(BTreeMap<&'a str, BencodeMap<'a>>),
+    ByteString(Vec<u8>),
+    List(Vec<BencodeMap>),
+    Dict(BTreeMap<Vec<u8>, BencodeMap>), 
 }
 
-#[derive(Error, Debug, PartialEq, Eq)]
-pub enum Error {
-    #[error("Unexpected end of input")]
-    UnexpectedEOF,
-    #[error("Unexpected ASCII or UTF-8 Formatting")]
-    UnexpectedFormat,
-    #[error("Unexpected, Code does not match Bencode")]
-    InvalidCode,
-    #[error("Unexpected, String delimiter not found")]
-    InvalidStringFormat,
-    #[error("Unexpected, missing delimiter in code")]
-    MissingDelimiter(u8),
-    #[error("Error, Dictionary keys are not in lexical order")]
-    InvalidKeyOrder,
+impl From<&str> for BencodeMap {
+    fn from(s: &str) -> Self { BencodeMap::ByteString(s.to_string().as_bytes().to_vec()) }
 }
-
-pub type Result<T> = std::result::Result<T, Error>;
+impl From<BTreeMap<Vec<u8>, BencodeMap>> for BencodeMap {
+    fn from(dict: BTreeMap<Vec<u8>, BencodeMap>) -> Self { BencodeMap::Dict(dict) }
+}
+impl From<InfoHash> for BencodeMap {
+    fn from(infohash: InfoHash) -> Self { BencodeMap::ByteString(infohash.0.to_vec()) }
+}
+impl From<NodeID> for BencodeMap {
+    fn from(id: NodeID) -> Self { BencodeMap::ByteString(id.0.to_vec()) }
+}
+impl From<&[u8]> for BencodeMap {
+    fn from(bytes: &[u8]) -> Self { BencodeMap::ByteString(bytes.to_vec()) }
+}
+impl From<u16> for BencodeMap {
+    fn from(int: u16) -> Self { BencodeMap::Integer(int as i64) }
+}
+impl From<Vec<u8>> for BencodeMap {
+    fn from(v: Vec<u8>) -> Self { BencodeMap::ByteString(v) }
+}
+impl From<String> for BencodeMap {
+    fn from(s: String) -> Self { BencodeMap::ByteString(s.into_bytes()) }
+}
+impl From<i32> for BencodeMap {
+    fn from(n: i32) -> Self { BencodeMap::Integer(n as i64) }
+}
+impl From<TransactionID> for BencodeMap {
+    fn from(t: TransactionID) -> Self { BencodeMap::ByteString(t.0.to_vec()) }
+}
+impl From<Vec<BencodeMap>> for BencodeMap {
+    fn from(v: Vec<BencodeMap>) -> Self { BencodeMap::List(v) }
+}
 
 // *************************** 
 // ****** Public APIs  *******
 // ***************************
 
-pub fn decode_to_bencode<'a>(input_code: &'a [u8]) -> Result<(BencodeMap<'a>, &'a [u8])> {
+pub fn decode_to_bencode(input_code: &[u8]) -> Result<(BencodeMap, &[u8])> {
     let (&first, rest) = input_code.split_first().ok_or(Error::UnexpectedEOF)?;
 
     match first {
@@ -43,15 +61,15 @@ pub fn decode_to_bencode<'a>(input_code: &'a [u8]) -> Result<(BencodeMap<'a>, &'
     }
 }
 
-pub fn encode_to_bytes<'a>(input_dict: &BencodeMap<'a>) -> Result<Vec<u8>> {
+pub fn encode_to_bytes(input: &BencodeMap) -> Result<Vec<u8>> {
     let mut buffer: Vec<u8> = Vec::new();
-    encode_value(input_dict, &mut buffer);
+    encode_value(input, &mut buffer);
     Ok(buffer)
 }
 
 // -------- Private Functions --------
 
-fn parse_int<'a>(input: &'a [u8]) -> Result<(BencodeMap<'a>, &'a [u8])> {
+fn parse_int(input: &[u8]) -> Result<(BencodeMap, &[u8])> {
     let end_pos = input
         .iter()
         .position(|&b| b == b'e')
@@ -78,7 +96,7 @@ fn parse_int<'a>(input: &'a [u8]) -> Result<(BencodeMap<'a>, &'a [u8])> {
     Ok((BencodeMap::Integer(integer), remainder))
 }
 
-fn parse_str<'a>(input: &'a [u8]) -> Result<(BencodeMap<'a>, &'a [u8])> {
+fn parse_str(input: &[u8]) -> Result<(BencodeMap, &[u8])> {
     let colon_pos = input
         .iter()
         .position(|&b| b == b':')
@@ -104,10 +122,10 @@ fn parse_str<'a>(input: &'a [u8]) -> Result<(BencodeMap<'a>, &'a [u8])> {
     let value = &input[str_start..str_end];
     let remainder = &input[str_end..];
 
-    Ok((BencodeMap::ByteString(value), remainder))
+    Ok((BencodeMap::ByteString(value.to_vec()), remainder))
 }
 
-fn parse_list<'a>(mut input: &'a [u8]) -> Result<(BencodeMap<'a>, &'a [u8])> {
+fn parse_list(mut input: &[u8]) -> Result<(BencodeMap, &[u8])> {
     let mut list: Vec<BencodeMap> = Vec::new();
 
     while !input.starts_with(b"e") {
@@ -123,9 +141,9 @@ fn parse_list<'a>(mut input: &'a [u8]) -> Result<(BencodeMap<'a>, &'a [u8])> {
     Ok((BencodeMap::List(list), &input[1..]))
 }
 
-fn parse_dict<'a>(mut input: &'a [u8]) -> Result<(BencodeMap<'a>, &'a [u8])> {
-    let mut dict: BTreeMap<&str, BencodeMap> = BTreeMap::new();
-    let mut last_key: Option<&str> = None;
+fn parse_dict(mut input: &[u8]) -> Result<(BencodeMap, &[u8])> {
+    let mut dict: BTreeMap<Vec<u8>, BencodeMap> = BTreeMap::new();
+    let mut last_key: Option<Vec<u8>> = None;
 
     while !input.starts_with(b"e") {
         if input.is_empty() {
@@ -137,34 +155,33 @@ fn parse_dict<'a>(mut input: &'a [u8]) -> Result<(BencodeMap<'a>, &'a [u8])> {
 
         let key_bytes = match key {
             BencodeMap::ByteString(b) => b,
-            _ => return Err(Error::InvalidCode), // returns error instead of panicking
+            _ => return Err(Error::InvalidCode),
         };
 
-        let key_str = std::str::from_utf8(key_bytes).map_err(|_| Error::InvalidStringFormat)?;
-
-        if let Some(prev) = last_key {
-            if prev >= key_str {
+        // Enforce strict Bencode lexicographical key ordering
+        if let Some(ref prev) = last_key {
+            if prev >= &key_bytes {
                 return Err(Error::InvalidKeyOrder);
             }
         }
-        last_key = Some(key_str);
+        last_key = Some(key_bytes.clone());
 
         let (val, rest) = decode_to_bencode(input)?;
-        dict.insert(key_str, val);
+        dict.insert(key_bytes, val);
         input = rest;
     }
 
     Ok((BencodeMap::Dict(dict), &input[1..]))
 }
 
-fn encode_value<'a>(input_dict: &BencodeMap<'a>, buf: &mut Vec<u8>) {
-    match input_dict {
+fn encode_value(input: &BencodeMap, buf: &mut Vec<u8>) {
+    match input {
         BencodeMap::Dict(dict) => {
             buf.push(b'd');
             for (k, v) in dict {
                 buf.extend_from_slice(k.len().to_string().as_bytes());
                 buf.push(b':');
-                buf.extend_from_slice(k.as_bytes());
+                buf.extend_from_slice(k);
                 encode_value(v, buf);
             }
             buf.push(b'e');

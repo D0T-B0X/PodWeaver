@@ -1,6 +1,6 @@
 use std::fs;
 use std::env;
-use std::path::{PathBuf, Path};
+use std::path::PathBuf;
 
 use crate::error::*;
 
