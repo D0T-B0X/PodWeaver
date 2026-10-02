@@ -5,7 +5,6 @@ use std::collections::BTreeMap;
 
 use crate::types::*;
 use crate::error::*;
-use crate::dht::node::*;
 use crate::metainfo::bencode::*;
 
 pub enum QueryPayload {
@@ -153,22 +152,6 @@ pub fn decode_message(message: Vec<u8>) -> Result<KRPCMessage> {
 
         _ => Err(Error::InvalidRPCFormat)
     }
-}
-
-pub fn ping(node_id: NodeID) -> Result<()> {
-    todo!();
-}
-
-pub fn find_node(infohash: InfoHash) -> Result<Node> {
-    todo!();
-}
-
-pub fn get_peers(infohash: InfoHash) -> Result<Vec<Node>> {
-    todo!();
-}
-
-pub fn announce() {
-
 }
 
 fn dict<const N: usize>(pairs: [(&str, BencodeMap); N]) -> BencodeMap {

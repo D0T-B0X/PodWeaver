@@ -1,7 +1,5 @@
 use thiserror::Error;
 
-use crate::metainfo;
-
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("Error, Could not establish a connection")]

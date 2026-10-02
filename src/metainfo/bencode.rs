@@ -45,19 +45,6 @@ impl From<Vec<BencodeMap>> for BencodeMap {
     fn from(v: Vec<BencodeMap>) -> Self { BencodeMap::List(v) }
 }
 
-struct DictBuilder(BTreeMap<Vec<u8>, BencodeMap>);
-
-impl DictBuilder {
-    fn new() -> Self { Self(BTreeMap::new()) }
-
-    fn with(mut self, key: &str, val: impl Into<BencodeMap>) -> Self {
-        self.0.insert(key.as_bytes().to_vec(), val.into());
-        self
-    }
-
-    fn build(self) -> BencodeMap { BencodeMap::Dict(self.0) }
-}
-
 // *************************** 
 // ****** Public APIs  *******
 // ***************************
