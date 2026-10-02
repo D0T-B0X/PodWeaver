@@ -8,13 +8,15 @@ use std::sync::Mutex;
 
 use contact::*;
 use routing::*;
+use crate::dht::krpc::KRPCMessage;
 use crate::error::*;
 use crate::runtime::pending_map::*;
+use crate::types::TransactionID;
 
 pub struct DHT {
     pub contact: Arc<Contact>,
     pub routing_table: Arc<Mutex<RoutingTable>>,
-    pub task_map: PendingMap,
+    pub task_map: PendingMap<TransactionID, KRPCMessage>,
 }
 
 impl DHT {
@@ -29,16 +31,5 @@ impl DHT {
             routing_table,
             task_map,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = 4;
-        assert_eq!(result, 4);
     }
 }
