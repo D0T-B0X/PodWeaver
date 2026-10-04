@@ -7,8 +7,10 @@ pub mod runtime;
 pub mod storage;
 
 use std::path::Path;
+use tokio::sync::mpsc;
 
-use error::*;
+use weft::Weft;
+use types::Result;
 use runtime::RuntimeManager;
 use runtime::shutdown::ShutdownController;
 
@@ -23,8 +25,13 @@ impl Engine {
         Self { runtime, shutdown }
     }
 
-    pub async fn start_weft<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        
+    pub async fn init<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        let path: &Path = path.as_ref();
+        let weft = Weft::new(None, None, None, path)?;
+        let info_hash = weft.info_hash()?;
+
+        // let (candidate_tx, candidate_rx) = mpsc::channel(100);
+        // let (block_tx, block_rx) = mpsc::channel(256);
         Ok(())        
     }
 

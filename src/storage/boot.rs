@@ -2,7 +2,8 @@ use std::fs;
 use std::env;
 use std::path::PathBuf;
 
-use crate::error::*;
+use crate::error::Error;
+use crate::types::Result;
 
 pub fn find_path(filename: &str) -> Result<PathBuf> {
     let podweaver_home = find_or_set_home()?;

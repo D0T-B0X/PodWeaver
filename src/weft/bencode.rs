@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 
 use crate::error::*;
 use crate::types::*;
@@ -43,6 +44,23 @@ impl From<TransactionID> for BencodeMap {
 }
 impl From<Vec<BencodeMap>> for BencodeMap {
     fn from(v: Vec<BencodeMap>) -> Self { BencodeMap::List(v) }
+}
+impl From<Vec<(NodeID, SocketAddr)>> for BencodeMap {
+    fn from(nodes: Vec<(NodeID, SocketAddr)>) -> Self {
+        BencodeMap::ByteString(nodes.into_iter()
+            .filter_map(|(id, addr)| match addr {
+                SocketAddr::V4(v4) => Some((id, v4)),
+                _ => None,                
+            })
+            .flat_map(|(id, v4)| {
+                let mut buf = [0u8; 38];
+                buf[..32].copy_from_slice(&id.0.to_vec());
+                buf[32..36].copy_from_slice(&v4.ip().octets());
+                buf[36..38].copy_from_slice(&v4.port().to_be_bytes());
+                buf
+            })
+            .collect())
+    }
 }
 
 // *************************** 
