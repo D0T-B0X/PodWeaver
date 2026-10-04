@@ -3,9 +3,14 @@ use std::net::SocketAddr;
 use std::net::SocketAddrV4;
 use std::collections::BTreeMap;
 
-use crate::types::*;
-use crate::error::*;
-use crate::metainfo::bencode::*;
+use crate::error::Error;
+use crate::types::Result;
+use crate::types::NodeID;
+use crate::types::InfoHash;
+use crate::weft::bencode::*;
+use crate::types::TransactionID;
+
+const COMPACT_NODE_LEN: usize = 38;
 
 pub enum QueryPayload {
     Ping { id: NodeID },
@@ -41,9 +46,9 @@ impl QueryPayload {
 
 pub enum ResponsePayload {
     Id { id: NodeID },
-    Nodes { id: NodeID, nodes: Vec<u8> },
+    Nodes { id: NodeID, nodes: Vec<(NodeID, SocketAddr)> },
     Peers { id: NodeID, token: Vec<u8>, values: Vec<std::net::SocketAddr> },
-    Closer { id: NodeID, token: Vec<u8>, nodes: Vec<u8> },
+    Closer { id: NodeID, token: Vec<u8>, nodes: Vec<(NodeID, SocketAddr)> },
 }
 
 impl ResponsePayload {
@@ -130,43 +135,19 @@ pub fn encode_message(message: KRPCMessage) -> Result<Vec<u8>> {
     Ok(encode_to_bytes(&top)?)
 }
 
-pub fn decode_message(message: Vec<u8>) -> Result<KRPCMessage> {
-    let BencodeMap::Dict(dict) = decode_to_bencode(&message)?.0 else {
+pub fn decode_message(message: &[u8]) -> Result<KRPCMessage> {
+    let BencodeMap::Dict(dict) = decode_to_bencode(message)?.0 else {
         return Err(Error::UnexpectedFormat);
     };
 
     let y = bytes_from_dict(&dict, b"y")?;
 
     match y {
-        b"q" => {
-            Ok(decode_query(&dict)?)
-        }
-
-        b"r" => {
-            Ok(decode_response(&dict)?)
-        }
-
-        b"e" => {
-            Ok(decode_error(&dict)?)
-        }
-
+        b"q" => decode_query(&dict),
+        b"r" => decode_response(&dict),
+        b"e" => decode_error(&dict),
         _ => Err(Error::InvalidRPCFormat)
     }
-}
-
-fn dict<const N: usize>(pairs: [(&str, BencodeMap); N]) -> BencodeMap {
-    BencodeMap::Dict(
-        pairs.into_iter()
-            .map(|(k, v)| (k.as_bytes().to_vec(), v))
-            .collect()
-    )
-}
-
-fn compact_v4(addr: &SocketAddr) -> Option<Vec<u8>> {
-    let SocketAddr::V4(a) = addr else { return None };
-    let mut out = a.ip().octets().to_vec();
-    out.extend_from_slice(&a.port().to_be_bytes());
-    Some(out)
 }
 
 fn decode_query(dict: &BTreeMap<Vec<u8>, BencodeMap>) -> Result<KRPCMessage> {
@@ -247,11 +228,15 @@ fn decode_response(dict: &BTreeMap<Vec<u8>, BencodeMap>) -> Result<KRPCMessage> 
         ResponsePayload::Peers { id, token, values }
     } else if args_dict.contains_key(b"token".as_slice()) {
         let token = bytes_from_dict(args_dict, b"token")?.to_vec();
-        let nodes = bytes_from_dict(args_dict, b"nodes")?.to_vec();
+        let nodes = parse_compact_nodes(
+            &bytes_from_dict(args_dict, b"nodes")?
+        )?;
 
         ResponsePayload::Closer { id, token, nodes }
     } else if args_dict.contains_key(b"nodes".as_slice()) {
-        let nodes = bytes_from_dict(args_dict, b"nodes")?.to_vec();
+        let nodes = parse_compact_nodes(
+            &bytes_from_dict(args_dict, b"nodes")?
+        )?;
 
         ResponsePayload::Nodes { id, nodes }
     } else {
@@ -294,7 +279,25 @@ fn decode_error(dict: &BTreeMap<Vec<u8>, BencodeMap>) -> Result<KRPCMessage> {
     })
 }
 
-fn bytes_from_dict<'a>(dict: &'a BTreeMap<Vec<u8>, BencodeMap>, key: &'a [u8]) -> Result<&'a [u8]> {
+fn dict<const N: usize>(pairs: [(&str, BencodeMap); N]) -> BencodeMap {
+    BencodeMap::Dict(
+        pairs.into_iter()
+            .map(|(k, v)| (k.as_bytes().to_vec(), v))
+            .collect()
+    )
+}
+
+fn compact_v4(addr: &SocketAddr) -> Option<Vec<u8>> {
+    let SocketAddr::V4(a) = addr else { return None };
+    let mut out = a.ip().octets().to_vec();
+    out.extend_from_slice(&a.port().to_be_bytes());
+    Some(out)
+}
+
+fn bytes_from_dict<'a>(
+    dict: &'a BTreeMap<Vec<u8>, BencodeMap>, 
+    key: &[u8]
+) -> Result<&'a [u8]> {
     dict
         .get(key)
         .and_then(|val| match val {
@@ -304,7 +307,10 @@ fn bytes_from_dict<'a>(dict: &'a BTreeMap<Vec<u8>, BencodeMap>, key: &'a [u8]) -
         .ok_or(Error::UnexpectedFormat)
 }
 
-fn int_from_dict<'a>(dict: &'a BTreeMap<Vec<u8>, BencodeMap>, key: &'a [u8]) -> Result<i64> {
+fn int_from_dict<'a>(
+    dict: &'a BTreeMap<Vec<u8>, BencodeMap>, 
+    key: &[u8]
+) -> Result<i64> {
     dict
         .get(key)
         .and_then(|val| match val {
@@ -316,7 +322,7 @@ fn int_from_dict<'a>(dict: &'a BTreeMap<Vec<u8>, BencodeMap>, key: &'a [u8]) -> 
 
 fn subdict_from_dict<'a>(
     dict: &'a BTreeMap<Vec<u8>, BencodeMap>, 
-    key: &'a [u8]
+    key: &[u8]
 ) -> Result<&'a BTreeMap<Vec<u8>, BencodeMap>> {
     dict
     .get(key)
@@ -327,7 +333,10 @@ fn subdict_from_dict<'a>(
     .ok_or(Error::UnexpectedFormat)
 }
 
-fn list_from_dict<'a>(dict: &'a BTreeMap<Vec<u8>, BencodeMap>, key: &'a [u8]) -> Result<&'a Vec<BencodeMap>> {
+fn list_from_dict<'a>(
+    dict: &'a BTreeMap<Vec<u8>, BencodeMap>, 
+    key: &[u8]
+) -> Result<&'a Vec<BencodeMap>> {
     dict.get(key)
         .and_then(|ls| match ls {
             BencodeMap::List(ls) => Some(ls),
@@ -358,4 +367,19 @@ fn parse_compact_socket_addrs<'a>(list: &'a Vec<BencodeMap>) -> Result<Vec<Socke
     };
 
     Ok(addrs)
+}
+
+fn parse_compact_nodes(bytes: &[u8]) -> Result<Vec<(NodeID, SocketAddr)>> {
+    if bytes.len() % COMPACT_NODE_LEN != 0 {
+        return Err(Error::UnexpectedFormat);
+    }
+
+    Ok(bytes.chunks_exact(COMPACT_NODE_LEN).map(|c| {
+        let mut id = [0u8; 32];
+        id.copy_from_slice(&c[..32]);
+
+        let ip = Ipv4Addr::new(c[32], c[33], c[34], c[35]);
+        let port = u16::from_be_bytes([c[36], c[37]]);
+        (NodeID(id), SocketAddr::V4(SocketAddrV4::new(ip, port)))
+    }).collect())
 }

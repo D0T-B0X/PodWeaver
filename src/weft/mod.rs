@@ -1,15 +1,16 @@
 pub mod bencode;
 
-use std::collections::BTreeMap;
 use std::fs;
-use std::io::{BufReader, Read};
+use std::path::Path;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+use std::io::{BufReader, Read};
 
 use bencode::*;
 use crate::error::*;
 use crate::types::*;
 
-pub struct MetaInfo {
+pub struct Weft {
     pub author: Option<String>,
     pub creation_date: Option<String>,
     pub comments: Option<String>,
@@ -23,12 +24,12 @@ pub struct Info {
     pub pieces: Vec<[u8; 32]>,
 }
 
-impl MetaInfo {
+impl Weft {
     pub fn new(
         author: Option<String>,
         creation_date: Option<String>,
         comments: Option<String>,
-        filename: &str,
+        filename: &Path,
     ) -> Result<Self> {
         let filepath = filename;
         let metadata = fs::metadata(filepath)?;
@@ -50,19 +51,21 @@ impl MetaInfo {
             return Err(Error::IncompletePieces);
         }
 
-        let metainfo = MetaInfo {
+        Ok(Self {
             author,
             creation_date,
             comments,
             info: Info {
                 pieces: hash_pieces,
-                filename: filepath.to_string(),
+                filename: String::from(filepath.to_str().unwrap()),
                 total_length: file_size,
                 piece_length: piece_len_bytes as u32,
             },
-        };
+        })
+    }
 
-        Ok(metainfo)
+    pub fn from_file() -> Self {
+        todo!();
     }
 
     pub fn encode(&self) -> Result<Vec<u8>> {
@@ -116,7 +119,7 @@ impl MetaInfo {
     }
 }
 
-fn get_pieces(filepath: &str, piece_len: u32) -> Result<Vec<[u8; 32]>> {
+fn get_pieces(filepath: &Path, piece_len: u32) -> Result<Vec<[u8; 32]>> {
     let file = fs::File::open(filepath)?;
     let mut reader = BufReader::new(file);
     let piece_len = piece_len as usize;
@@ -222,15 +225,4 @@ fn get_info_pieces(
             arr
         })
         .collect())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = 4;
-        assert_eq!(result, 4);
-    }
 }

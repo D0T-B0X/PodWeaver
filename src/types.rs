@@ -1,4 +1,8 @@
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub use crate::error::Error;
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeID(pub [u8; 32]);
 pub struct InfoHash(pub [u8; 32]);
 

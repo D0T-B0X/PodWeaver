@@ -48,6 +48,6 @@ pub enum Error {
     MissingDelimiter(u8),
     #[error("Error, Dictionary keys are not in lexical order")]
     InvalidKeyOrder,
+    #[error("Error of remote origin")]
+    RemoteError(i32, String),
 }
-
-pub type Result<T> = std::result::Result<T, Error>;
