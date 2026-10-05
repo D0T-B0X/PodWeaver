@@ -5,9 +5,9 @@ pub mod error;
 pub mod types;
 pub mod runtime;
 pub mod storage;
+pub mod transport;
 
 use std::path::Path;
-use tokio::sync::mpsc;
 
 use weft::Weft;
 use types::Result;

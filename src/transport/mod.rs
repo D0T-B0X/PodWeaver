@@ -1,3 +1,5 @@
+pub mod pending_map;
+
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
@@ -10,14 +12,15 @@ use std::sync::atomic::AtomicU16;
 
 use crate::error::Error;
 use crate::types::Result;
-use super::contact::Contact;
-use super::krpc::KRPCMessage;
-use super::krpc::QueryPayload;
+use crate::types::NodeID;
+use pending_map::PendingMap;
 use crate::types::TransactionID;
-use super::krpc::encode_message;
-use super::krpc::decode_message;
-use super::krpc::ResponsePayload;
-use crate::runtime::pending_map::PendingMap;
+use crate::dht::contact::Contact;
+use crate::dht::krpc::KRPCMessage;
+use crate::dht::krpc::QueryPayload;
+use crate::dht::krpc::encode_message;
+use crate::dht::krpc::decode_message;
+use crate::dht::krpc::ResponsePayload;
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(10); // 10 second query timeout
 
@@ -46,6 +49,10 @@ impl Transport {
             pending_map, 
             next_tid: Arc::new(AtomicU16::new(0)) 
         }
+    }
+
+    pub fn id(&self) -> &NodeID {
+        &self.contact.id
     }
 
     fn alloc_tid(&self) -> TransactionID {
@@ -128,7 +135,7 @@ mod tests {
     use crate::types::NodeID;
 
     async fn start(id: NodeID) -> (Transport, SocketAddr, mpsc::Receiver<IncomingQuery>, watch::Sender<bool>) {
-        let contact = Contact::with_node(id, "127.0.0.1:0".to_string()).await.unwrap();
+        let contact = Contact::with_node(id, "127.0.0.1:0").await.unwrap();
         let addr = contact.local_addr().unwrap();
         let t = Transport::new(contact, PendingMap::new());
         let (qtx, qrx) = mpsc::channel(16);

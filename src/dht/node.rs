@@ -1,7 +1,6 @@
 use std::time::Instant;
 use std::net::SocketAddr;
 
-use crate::error::*;
 use crate::types::*;
 
 #[derive(Clone)]
@@ -13,12 +12,12 @@ pub struct Node {
 }
 
 impl Node {
-    pub fn new(id: NodeID, sockaddr: SocketAddr) -> Result<Self> {
-        Ok(Self {
+    pub fn new(id: NodeID, sockaddr: SocketAddr) -> Self {
+        Self {
             id: id, 
             address: sockaddr,  
             last_seen: Instant::now(), 
             status: NodeStatus::Good 
-        })
+        }
     }
 }

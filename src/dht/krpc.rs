@@ -20,6 +20,15 @@ pub enum QueryPayload {
 }
 
 impl QueryPayload {
+    pub fn sender_id(&self) -> NodeID {
+        match self {
+            QueryPayload::Ping { id } | 
+            QueryPayload::GetPeers { id, .. } | 
+            QueryPayload::FindNode { id, .. } | 
+            QueryPayload::AnnouncePeer { id, .. } => *id
+        }
+    }
+
     fn into_parts(self) -> (BencodeMap, BencodeMap) {
         match self {
             Self::Ping { id } => ("ping".into(), dict([("id", id.into())])),
@@ -52,6 +61,15 @@ pub enum ResponsePayload {
 }
 
 impl ResponsePayload {
+    pub fn sender_id(&self) -> NodeID {
+        match self {
+            ResponsePayload::Id { id } | 
+            ResponsePayload::Peers { id, .. } | 
+            ResponsePayload::Nodes { id, .. } | 
+            ResponsePayload::Closer { id, .. } => *id
+        }
+    }
+
     fn into_args(self) -> BencodeMap {
         match self {
             Self::Id { id } => dict([("id", id.into())]),

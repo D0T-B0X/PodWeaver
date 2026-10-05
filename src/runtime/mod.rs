@@ -1,7 +1,6 @@
 pub mod tracker;
 pub mod shutdown;
 pub mod blocking;
-pub mod pending_map;
 
 use tokio_util::sync::CancellationToken;
 
