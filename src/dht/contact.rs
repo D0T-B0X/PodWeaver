@@ -25,7 +25,7 @@ impl Contact {
         })
     }
 
-    pub async fn with_node(id: NodeID, bind_addr: String) -> Result<Self> {
+    pub async fn with_node(id: NodeID, bind_addr: &str) -> Result<Self> {
         let socket = Arc::new(UdpSocket::bind(bind_addr).await?);
 
         Ok(Self {
@@ -85,8 +85,8 @@ mod tests {
     // Verify the send and receive functions work properly
     #[tokio::test]
     async fn send_then_recv_on_loopback() {
-        let a = Contact::with_node(NodeID([1; 32]), "127.0.0.1:0".parse().unwrap()).await.unwrap();
-        let b = Contact::with_node(NodeID([2; 32]), "127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let a = Contact::with_node(NodeID([1; 32]), "127.0.0.1:0").await.unwrap();
+        let b = Contact::with_node(NodeID([2; 32]), "127.0.0.1:0").await.unwrap();
 
         a.send(b.local_addr().unwrap(), b"Hello").await.unwrap();
 

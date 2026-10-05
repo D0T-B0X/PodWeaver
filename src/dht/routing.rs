@@ -1,10 +1,9 @@
 use std::sync::{Mutex, Arc};
 
-use crate::error::*;
 use crate::types::*;
 use crate::dht::node::*;
 
-const K: u8 = 20;
+pub const K: u8 = 20;
 const BIT_SPACE: usize = 256;
 
 pub struct Bucket{
@@ -36,6 +35,10 @@ impl Bucket {
     pub fn closest(&self) -> &[Node] {
         &self.nodes
     }
+
+    pub fn exists(&self, target: &NodeID) -> bool {
+        self.nodes.iter().any(|n| n.id == *target)
+    }
 }
 
 pub struct RoutingTable {
@@ -57,14 +60,14 @@ impl RoutingTable {
 
     pub fn insert(&mut self, node: Node) -> Result<()> {
         if node.id == self.id { return Ok(()); }
-        let b_idx = bucket_index(&node.id, &self.id)?;
+        let b_idx = bucket_index(&node.id, &self.id);
         self.buckets[b_idx].insert(node);
         Ok(())
     }
 
-    pub fn closest(&self, target: &InfoHash, node_count: usize) -> Result<Vec<Node>> {
+    pub fn closest(&self, target: &NodeID, node_count: usize) -> Vec<Node> {
         let target_id = NodeID(target.0);
-        let closest_bucket = bucket_index(&target_id, &self.id)?;
+        let closest_bucket = bucket_index(&target_id, &self.id);
 
         let mut closest_nodes: Vec<Node> = Vec::with_capacity(node_count * 2);
         closest_nodes.extend(self.buckets[closest_bucket].nodes.iter().cloned());
@@ -84,7 +87,11 @@ impl RoutingTable {
 
         closest_nodes.sort_by_key(|n| xor_nodes(&n.id, &target_id));
         closest_nodes.truncate(node_count);
-        Ok(closest_nodes)
+        closest_nodes
+    }
+
+    pub fn contains(&self, target: &NodeID) -> bool {
+        self.buckets.iter().any(|bucket| bucket.exists(target))
     }
 }
 
@@ -96,18 +103,18 @@ fn xor_nodes(a: &NodeID, b: &NodeID) -> [u8; 32] {
     out
 }
 
-fn bucket_index(node: &NodeID, self_node: &NodeID) -> Result<usize> {
+fn bucket_index(node: &NodeID, self_node: &NodeID) -> usize {
     if node.0 == self_node.0 {
-        return Err(Error::IdenticalKeys);
+        return 0;
     }
 
     let xor_dist = xor_nodes(node, self_node);
     for (byte_idx, &byte) in xor_dist.iter().enumerate() {
         if byte != 0 {
             let leading_zeroes = byte.leading_zeros() as usize;
-            return Ok(byte_idx * 8 + leading_zeroes);
+            return byte_idx * 8 + leading_zeroes;
         }
     }
 
-    Err(Error::UnexpectedIDSearchExit) // What the fuck is going on dawg???
+    return 0;
 }

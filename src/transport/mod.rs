@@ -135,7 +135,7 @@ mod tests {
     use crate::types::NodeID;
 
     async fn start(id: NodeID) -> (Transport, SocketAddr, mpsc::Receiver<IncomingQuery>, watch::Sender<bool>) {
-        let contact = Contact::with_node(id, "127.0.0.1:0".to_string()).await.unwrap();
+        let contact = Contact::with_node(id, "127.0.0.1:0").await.unwrap();
         let addr = contact.local_addr().unwrap();
         let t = Transport::new(contact, PendingMap::new());
         let (qtx, qrx) = mpsc::channel(16);
