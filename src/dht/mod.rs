@@ -106,9 +106,7 @@ impl DHT {
 
 #[cfg(test)]
 mod tests {
-    use std::panic::UnwindSafe;
-
-use tokio::sync::mpsc;
+    use tokio::sync::mpsc;
 
     use contact::Contact;
     use crate::transport::Transport;
