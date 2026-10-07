@@ -18,7 +18,7 @@ Entries in the dotted boxes here represent optional fields.
 
 The generated metainfo for each file that will be shared is needed by all peers that wish to download the it, therefore it must stored in a standardised format readable by all Pods in the PodWeaver Fabric. There are several encoding standards available to achieve this, however to simplify this project, I will be using the pre-established `Bencoding` standard developed by BitTorrent. This project will contain an encoder and decoder tool to parse and generate the custom encoded metainfo files. 
 
-*All metainfo files for PodWeaver are appended with a `.weft` file extension.* 
+*All metainfo files for PodWeaver are appended with a `.yarn` file extension.* 
 
 #### 1.1.1 Bencoding Rules
 
