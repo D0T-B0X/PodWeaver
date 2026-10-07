@@ -3,7 +3,7 @@ use std::sync::{Mutex, Arc};
 use crate::types::*;
 use crate::dht::node::*;
 
-pub const K: u8 = 20;
+pub const K: usize = 20;
 const BIT_SPACE: usize = 256;
 
 pub struct Bucket{
@@ -22,11 +22,13 @@ impl Bucket {
             return;
         }
 
-        // TODO => Update after PING implementation
-        if self.nodes.len() == K as usize {
-            self.nodes.remove(0);
-            self.nodes.push(node);
-            return;
+        if self.nodes.len() >= K { return; }
+
+        if  let Some(last_node) = self.nodes.last() {
+            match last_node.status {
+                NodeStatus::Good => return,
+                _ => { self.nodes.pop(); }
+            }
         }
 
         self.nodes.push(node);
@@ -38,6 +40,16 @@ impl Bucket {
 
     pub fn exists(&self, target: &NodeID) -> bool {
         self.nodes.iter().any(|n| n.id == *target)
+    }
+
+    pub fn shake(&self) -> Vec<Node> {
+        self.nodes.clone()
+    }
+
+    pub fn pluck(&mut self, target: &NodeID) {
+        if let Some(pos) = self.nodes.iter().position(|n| n.id == *target) {
+            self.nodes.remove(pos);
+        }
     }
 }
 
@@ -58,22 +70,21 @@ impl RoutingTable {
         )
     }
 
-    pub fn insert(&mut self, node: Node) -> Result<()> {
-        if node.id == self.id { return Ok(()); }
+    pub fn insert(&mut self, node: Node) {
+        if node.id == self.id { return; }
         let b_idx = bucket_index(&node.id, &self.id);
         self.buckets[b_idx].insert(node);
-        Ok(())
     }
 
-    pub fn closest(&self, target: &NodeID, node_count: usize) -> Vec<Node> {
+    pub fn closest(&self, target: &NodeID) -> Vec<Node> {
         let target_id = NodeID(target.0);
         let closest_bucket = bucket_index(&target_id, &self.id);
 
-        let mut closest_nodes: Vec<Node> = Vec::with_capacity(node_count * 2);
+        let mut closest_nodes: Vec<Node> = Vec::with_capacity(K * 2);
         closest_nodes.extend(self.buckets[closest_bucket].nodes.iter().cloned());
 
         let mut it = 1;
-        while closest_nodes.len() < node_count && (closest_bucket > it || closest_bucket + it < BIT_SPACE) {
+        while closest_nodes.len() < K && (closest_bucket > it || closest_bucket + it < BIT_SPACE) {
             if it <= closest_bucket {
                 closest_nodes.extend(self.buckets[closest_bucket - it].nodes.iter().cloned());
             }
@@ -86,12 +97,23 @@ impl RoutingTable {
         }
 
         closest_nodes.sort_by_key(|n| xor_nodes(&n.id, &target_id));
-        closest_nodes.truncate(node_count);
         closest_nodes
     }
 
     pub fn contains(&self, target: &NodeID) -> bool {
         self.buckets.iter().any(|bucket| bucket.exists(target))
+    }
+
+    pub fn shake(&self) -> Vec<Node> {
+        self.buckets
+            .iter()
+            .flat_map(|b| b.shake())
+            .collect()
+    }
+
+    pub fn pluck(&mut self, target: &NodeID) {
+        let bucket_pos = bucket_index(&self.id, target);
+        self.buckets[bucket_pos].pluck(target);
     }
 }
 
