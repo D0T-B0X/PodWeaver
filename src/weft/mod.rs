@@ -35,6 +35,7 @@ impl Weft {
         let metadata = fs::metadata(filepath)?;
         let file_size = metadata.len();
 
+        // dynamic piece sizing
         const MAX_PIECE_COUNT: u64 = 4096;
 
         let file_size_kb = file_size / 1024;

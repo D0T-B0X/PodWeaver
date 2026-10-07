@@ -6,7 +6,7 @@ use tokio::net::UdpSocket;
 use crate::error::Error;
 use crate::types::Result;
 use crate::types::NodeID;
-use crate::storage::boot::*;
+use crate::storage::disk::*;
 
 #[derive(Clone)]
 pub struct Contact {
