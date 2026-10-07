@@ -53,5 +53,11 @@ pub enum Error {
     #[error("Error, Peer token is either invalid or expired")]
     InvalidPeerToken,
     #[error("Error, Query could not be sent")]
-    SendFailed
+    SendFailed,
+    #[error("Error, yarn creation failed due to tokio task panic")]
+    YarnCreationPanicked(String),
+    #[error("Error, the file provided is empty")]
+    EmptyFile,
+    #[error("Error, the file provided does not exist")]
+    FileNotFound,
 }
