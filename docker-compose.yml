@@ -1,0 +1,40 @@
+services:
+  pod1:
+    build: .
+    container_name: podweaver-pod1
+    networks: 
+      podweaver_net:
+        ipv4_address: 172.20.0.101
+    command: --id 1 --bind 0.0.0.0:8001
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/healthy"]
+      interval: 1s
+      timeout: 1s
+      retries: 10
+      start_period: 1s
+
+  pod2:
+    build: .
+    container_name: podweaver-pod2
+    depends_on:
+      pod1:
+        condition: service_healthy
+    networks: 
+      podweaver_net:
+        ipv4_address: 172.20.0.102
+    command: --id 2 --bind 0.0.0.0:8002 --bootstrap 172.20.0.101:8001
+
+  pod3:
+    build: .
+    container_name: podweaver-pod3
+    depends_on:
+      pod1:
+        condition: service_healthy
+    networks: 
+      podweaver_net:
+        ipv4_address: 172.20.0.103
+    command: --id 3 --bind 0.0.0.0:8003 --bootstrap 172.20.0.101:8001
+
+networks:
+  podweaver_net:
+    driver: bridge
