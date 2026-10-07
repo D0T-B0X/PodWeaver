@@ -225,7 +225,7 @@ fn hash_bytes(piece: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(piece);
 
-    #[cfg(test)]
+#[cfg(test)]
 mod tests {
     use super::*;
 
