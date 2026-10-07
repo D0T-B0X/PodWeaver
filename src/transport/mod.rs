@@ -1,3 +1,4 @@
+pub mod contact;
 pub mod pending_map;
 
 use std::sync::Arc;
@@ -10,19 +11,19 @@ use tokio::sync::oneshot;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::AtomicU16;
 
+use contact::Contact;
 use crate::error::Error;
 use crate::types::Result;
 use crate::types::NodeID;
 use pending_map::PendingMap;
 use crate::types::TransactionID;
-use crate::dht::contact::Contact;
 use crate::dht::krpc::KRPCMessage;
 use crate::dht::krpc::QueryPayload;
 use crate::dht::krpc::encode_message;
 use crate::dht::krpc::decode_message;
 use crate::dht::krpc::ResponsePayload;
 
-const QUERY_TIMEOUT: Duration = Duration::from_secs(10); // 10 second query timeout
+const QUERY_TIMEOUT: Duration = Duration::from_secs(3); // 3 second query timeout
 
 pub struct PendingQuery {
     pub to : SocketAddr,
@@ -57,6 +58,10 @@ impl Transport {
 
     fn alloc_tid(&self) -> TransactionID {
         TransactionID(self.next_tid.fetch_add(1, Ordering::Relaxed).to_be_bytes())
+    }
+
+    pub fn addr(&self) -> Result<SocketAddr> {
+        self.contact.local_addr()
     }
 
     pub async fn query(&self, to: SocketAddr, payload: QueryPayload) -> Result<ResponsePayload> {
@@ -96,28 +101,34 @@ impl Transport {
         queries: mpsc::Sender<IncomingQuery>, 
         mut stop: watch::Receiver<bool>
     ) {
-        // 2kB buffer
-        let mut buffer = [0u8; 2048];
+        if *stop.borrow() {
+            return;
+        }
+
+        // 8kB buffer
+        let mut buffer = [0u8; 8192];
         loop {
             tokio::select! {
-                _ = stop.changed() => break,
+                _ = stop.changed() => return,
                 res = self.contact.receive(&mut buffer) => {
                     let Ok((len, from)) = res else { continue };
                     let Ok(msg) = decode_message(&buffer[..len]) else { continue };
-                    self.dispatch(from, msg, &queries);
+                    let _ = self.dispatch(from, msg, &queries);
                 }
             }
         }
     }
 
-    fn dispatch(&self, from: SocketAddr, msg: KRPCMessage, queries: &mpsc::Sender<IncomingQuery>) {
+    fn dispatch(&self, from: SocketAddr, msg: KRPCMessage, queries: &mpsc::Sender<IncomingQuery>) -> Result<()> {
         match msg {
             KRPCMessage::Response { transaction_id, payload } => 
-                self.complete(from, transaction_id, Ok(payload)),
+                Ok(self.complete(from, transaction_id, Ok(payload))),
             KRPCMessage::Error { transaction_id, code, message } =>
-                self.complete(from, transaction_id, Err(Error::RemoteError(code, message))),
+                Ok(self.complete(from, transaction_id, Err(Error::RemoteError(code, message)))),
             KRPCMessage::Query { transaction_id, payload } => {
-                let _ = queries.try_send(IncomingQuery { from, transaction_id, payload });
+                queries
+                    .try_send(IncomingQuery { from, transaction_id, payload })
+                    .map_err(|_| Error::SendFailed)
             }
         }
     }
