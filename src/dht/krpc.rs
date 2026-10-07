@@ -7,7 +7,7 @@ use crate::error::Error;
 use crate::types::Result;
 use crate::types::NodeID;
 use crate::types::InfoHash;
-use crate::weft::bencode::*;
+use crate::yarn::bencode::*;
 use crate::types::TransactionID;
 
 const COMPACT_NODE_LEN: usize = 38;

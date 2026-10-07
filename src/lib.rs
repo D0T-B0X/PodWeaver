@@ -1,15 +1,13 @@
 pub mod dht;
 pub mod peer;
-pub mod weft;
+pub mod yarn;
 pub mod error;
 pub mod types;
 pub mod runtime;
 pub mod storage;
 pub mod transport;
 
-use std::path::Path;
-
-use weft::Weft;
+use yarn::Yarn;
 use types::Result;
 use runtime::RuntimeManager;
 use runtime::shutdown::ShutdownController;
@@ -25,10 +23,9 @@ impl Engine {
         Self { runtime, shutdown }
     }
 
-    pub async fn init<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let path: &Path = path.as_ref();
-        let weft = Weft::new(None, None, None, path)?;
-        let info_hash = weft.info_hash()?;
+    pub async fn init(&self, path: String) -> Result<()> {
+        let yarn = Yarn::from_file(None, None, None, path).await?;
+        let info_hash = yarn.info_hash()?;
 
         // let (candidate_tx, candidate_rx) = mpsc::channel(100);
         // let (block_tx, block_rx) = mpsc::channel(256);
