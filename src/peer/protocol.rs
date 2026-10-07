@@ -9,6 +9,7 @@ use crate::types::NodeID;
 use crate::types::InfoHash;
 use crate::yarn::bencode::BencodeMap;
 
+#[derive(Clone, Debug, PartialEq)]
 pub enum Message {
     // Establish a connection with another peer
     Handshake { 
@@ -80,7 +81,7 @@ impl Message {
             },
             Self::Bitfield { bits } => {
                 let mut dict: BTreeMap<Vec<u8>, BencodeMap> = BTreeMap::new();
-                dict.insert("type".into(), "bits".into());
+                dict.insert("type".into(), "bitfield".into());
                 dict.insert("bits".into(), bits.into());
 
                 dict.into()
@@ -106,7 +107,7 @@ impl Message {
             },
             Self::Cancel { piece_index, offset, length } => {
                 let mut dict: BTreeMap<Vec<u8>, BencodeMap> = BTreeMap::new();
-                dict.insert("type".into(), "piece".into());
+                dict.insert("type".into(), "cancel".into());
                 dict.insert("piece_index".into(), piece_index.into());
                 dict.insert("offset".into(), offset.into());
                 dict.insert("length".into(), length.into());
@@ -281,9 +282,70 @@ fn get_named_dict(name: &str) -> BencodeMap {
 
 fn decode_addrs(bytes: &Vec<u8>) -> Vec<SocketAddr> {
     bytes.chunks_exact(6).map(|b| {
-        let ip = Ipv4Addr::from_octets([b[0], b[1], b[2], b[3]]);
-        let port = u16::from_be_bytes([b[3], b[4]]);
+        let ip = Ipv4Addr::new(b[0], b[1], b[2], b[3]);
+        let port = u16::from_be_bytes([b[4], b[5]]);
 
         SocketAddr::V4(SocketAddrV4::new(ip, port))
     }).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rt(m: Message) {
+        let encoded = m.clone().to_bencode();
+        let decoded = Message::from_bencode(&encoded).unwrap();
+        assert_eq!(m, decoded);
+    }
+
+    #[test]
+    fn handshake_round_trip() {
+        rt(Message::Handshake {
+            node_id: NodeID([1; 32]),
+            info_hash: InfoHash([2; 32]),
+            listen_port: 8080,
+        });
+    }
+
+    #[test]
+    fn simple_state_messages() {
+        rt(Message::Choke);
+        rt(Message::Unchoke);
+        rt(Message::Interested);
+        rt(Message::NotInterested);
+        rt(Message::PexRequest);
+    }
+
+    #[test]
+    fn have_and_bitfield() {
+        rt(Message::Have { piece_index: 7 });
+        rt(Message::Bitfield { bits: vec![0b10110010, 0b00000001] });
+    }
+
+    #[test]
+    fn request_piece_cancel() {
+        rt(Message::Request { piece_index: 5, offset: 16384, length: 16384 });
+        rt(Message::Piece {
+            piece_index: 5,
+            offset: 16384,
+            data: vec![0xDE, 0xAD, 0xBE, 0xEF],
+        });
+        rt(Message::Cancel { piece_index: 5, offset: 16384, length: 16384 });
+    }
+
+    #[test]
+    fn pex_response_round_trip() {
+        rt(Message::PexResponse {
+            added: vec!["127.0.0.1:8001".parse().unwrap(), "10.0.0.1:80".parse().unwrap()],
+            dropped: vec!["192.168.1.1:6881".parse().unwrap()],
+        });
+    }
+
+    #[test]
+    fn unknown_type_rejected() {
+        let mut d: BTreeMap<Vec<u8>, BencodeMap> = BTreeMap::new();
+        d.insert(b"type".to_vec(), BencodeMap::ByteString(b"nonsense".to_vec()));
+        assert!(Message::from_bencode(&BencodeMap::Dict(d)).is_err());
+    }
 }
