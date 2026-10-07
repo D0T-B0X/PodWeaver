@@ -50,4 +50,8 @@ pub enum Error {
     InvalidKeyOrder,
     #[error("Error of remote origin")]
     RemoteError(i32, String),
+    #[error("Error, Peer token is either invalid or expired")]
+    InvalidPeerToken,
+    #[error("Error, Query could not be sent")]
+    SendFailed
 }

@@ -2,10 +2,9 @@ use std::net::Ipv4Addr;
 use std::net:: SocketAddr;
 use std::net::SocketAddrV4;
 
-use crate::storage::disk::read_or_create_file;
 use crate::types::Result;
-use super::disk::read_file;
 use super::disk::save_to_disk;
+use crate::storage::disk::read_or_create_file;
 
 const PEER_CACHE_FILENAME: &str = "peer_cache.silk";
 const MAX_PEERS: usize = 40;

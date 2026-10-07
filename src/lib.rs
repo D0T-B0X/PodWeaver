@@ -1,5 +1,5 @@
 pub mod dht;
-pub mod wire;
+pub mod peer;
 pub mod weft;
 pub mod error;
 pub mod types;
