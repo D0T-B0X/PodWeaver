@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 
 use crate::types::*;
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct Node {
     pub id: NodeID,    
     pub address: SocketAddr,
