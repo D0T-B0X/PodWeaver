@@ -1,21 +1,15 @@
 pub mod bencode;
 
 use std::fs;
+use sha2::Digest;
+use sha2::Sha256;
 use std::path::Path;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::io::{BufReader, Read};
 
 use bencode::*;
 use crate::error::*;
 use crate::types::*;
-
-pub struct Weft {
-    pub author: Option<String>,
-    pub creation_date: Option<String>,
-    pub comments: Option<String>,
-    pub info: Info,
-}
+use crate::storage::spool::Spool;
 
 pub struct Info {
     pub filename: String,
@@ -24,14 +18,43 @@ pub struct Info {
     pub pieces: Vec<[u8; 32]>,
 }
 
-impl Weft {
-    pub fn new(
+impl Info {
+    pub fn to_bencode(&self) -> BencodeMap {
+        let mut info_dict: BTreeMap<Vec<u8>, BencodeMap> = BTreeMap::new();
+        info_dict.insert(b"filename".to_vec(), BencodeMap::ByteString(self.filename.as_bytes().to_vec()));
+        info_dict.insert(b"total_length".to_vec(), BencodeMap::Integer(self.total_length as i64));
+        info_dict.insert(b"piece_length".to_vec(), BencodeMap::Integer(self.piece_length as i64));
+        info_dict.insert(b"pieces".to_vec(), BencodeMap::ByteString(self.pieces.concat()));
+
+        BencodeMap::Dict(info_dict)
+    }
+}
+
+pub struct Yarn {
+    pub author: Option<String>,
+    pub creation_date: Option<String>,
+    pub comments: Option<String>,
+    pub info: Info,
+}
+
+impl Yarn {
+    pub async fn from_file(
         author: Option<String>,
         creation_date: Option<String>,
         comments: Option<String>,
-        filename: &Path,
+        filepath: String
     ) -> Result<Self> {
-        let filepath = filename;
+        tokio::task::spawn_blocking(move || Self::from_file_blocking(author, creation_date, comments, &filepath))
+            .await
+            .map_err(|e| Error::YarnCreationPanicked(e.to_string()))?
+    }
+
+    fn from_file_blocking(
+        author: Option<String>,
+        creation_date: Option<String>,
+        comments: Option<String>,
+        filepath: &str
+    ) -> Result<Self> {
         let metadata = fs::metadata(filepath)?;
         let file_size = metadata.len();
 
@@ -40,17 +63,16 @@ impl Weft {
 
         let file_size_kb = file_size / 1024;
         let piece_len_kb = file_size_kb / MAX_PIECE_COUNT;
-        let mut piece_len_bytes = piece_len_kb.next_power_of_two() * 1024;
+        let mut piece_len_bytes= piece_len_kb.next_power_of_two() * 1024;
 
-        piece_len_bytes = std::cmp::min(piece_len_bytes, 524_288);
-        piece_len_bytes = std::cmp::max(piece_len_bytes, 32_768);
-        let num_pieces = file_size.div_ceil(piece_len_bytes);
+        piece_len_bytes = piece_len_bytes.clamp(32_768, 524_288);
+        let hash_pieces: Vec<[u8; 32]> = get_piece_hashes(filepath, piece_len_bytes, file_size)?;
 
-        let hash_pieces: Vec<[u8; 32]> = get_pieces(filepath, piece_len_bytes as u32)?;
-
-        if hash_pieces.len() != num_pieces as usize {
-            return Err(Error::IncompletePieces);
-        }
+        let filename = Path::new(filepath)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or(Error::UnexpectedFormat)?
+            .to_string();
 
         Ok(Self {
             author,
@@ -58,15 +80,11 @@ impl Weft {
             comments,
             info: Info {
                 pieces: hash_pieces,
-                filename: String::from(filepath.to_str().unwrap()),
+                filename: filename,
                 total_length: file_size,
                 piece_length: piece_len_bytes as u32,
             },
-        })
-    }
-
-    pub fn from_file() -> Self {
-        todo!();
+        }) 
     }
 
     pub fn encode(&self) -> Result<Vec<u8>> {
@@ -84,13 +102,7 @@ impl Weft {
             bencode_dict.insert(b"creation_date".to_vec(), BencodeMap::ByteString(d.as_bytes().to_vec()));
         }
 
-        let mut info_dict: BTreeMap<Vec<u8>, BencodeMap> = BTreeMap::new();
-        info_dict.insert(b"filename".to_vec(), BencodeMap::ByteString(self.info.filename.as_bytes().to_vec()));
-        info_dict.insert(b"total_length".to_vec(), BencodeMap::Integer(self.info.total_length as i64));
-        info_dict.insert(b"piece_length".to_vec(), BencodeMap::Integer(self.info.piece_length as i64));
-        info_dict.insert(b"pieces".to_vec(), BencodeMap::ByteString(self.info.pieces.concat()));
-
-        bencode_dict.insert(b"info".to_vec(), BencodeMap::Dict(info_dict));
+        bencode_dict.insert(b"info".to_vec(), self.info.to_bencode());
 
         encode_to_bytes(&BencodeMap::Dict(bencode_dict)).map_err(|_| Error::EncodeFail)
     }
@@ -109,47 +121,28 @@ impl Weft {
     }
 
     pub fn info_hash(&self) -> Result<InfoHash> {
-        let mut info_dict: BTreeMap<Vec<u8>, BencodeMap> = BTreeMap::new();
-        info_dict.insert(b"filename".to_vec(), BencodeMap::ByteString(self.info.filename.as_bytes().to_vec()));
-        info_dict.insert(b"total_length".to_vec(), BencodeMap::Integer(self.info.total_length as i64));
-        info_dict.insert(b"piece_length".to_vec(), BencodeMap::Integer(self.info.piece_length as i64));
-        info_dict.insert(b"pieces".to_vec(), BencodeMap::ByteString(self.info.pieces.concat()));
-
-        let bytes = encode_to_bytes(&BencodeMap::Dict(info_dict)).map_err(|_| Error::EncodeFail)?;
-        Ok(InfoHash(Sha256::digest(&bytes).into()))
+        let bytes = encode_to_bytes(&self
+            .info
+            .to_bencode())
+            .map_err(|_| Error::EncodeFail)?;
+        
+        Ok(InfoHash(hash_bytes(&bytes)))
     }
 }
 
-fn get_pieces(filepath: &Path, piece_len: u32) -> Result<Vec<[u8; 32]>> {
-    let file = fs::File::open(filepath)?;
-    let mut reader = BufReader::new(file);
-    let piece_len = piece_len as usize;
-    let mut buf = vec![0u8; piece_len];
+fn get_piece_hashes(filepath: &str, piece_len: u64, total_len: u64) -> Result<Vec<[u8; 32]>> {
+    let mut spool = Spool::new(filepath, piece_len, total_len)?;
     let mut pieces: Vec<[u8; 32]> = Vec::new();
 
     loop {
-        let mut filled = 0;
-        while filled < piece_len {
-            let n = reader.read(&mut buf[filled..])?;
-            if n == 0 {
-                break;
-            }
-            filled += n;
+        let bytes = spool.read_next()?;
+        if bytes.is_empty() {
+            return Ok(pieces);
         }
 
-        if filled == 0 {
-            break;
-        }
-
-        let hash: [u8; 32] = Sha256::digest(&buf[..filled]).into();
+        let hash = hash_bytes(&bytes);
         pieces.push(hash);
-
-        if filled < piece_len {
-            break;
-        }
     }
-
-    Ok(pieces)
 }
 
 fn bencode_to_info(dict: &BTreeMap<Vec<u8>, BencodeMap>) -> Result<Info> {
@@ -226,4 +219,10 @@ fn get_info_pieces(
             arr
         })
         .collect())
+}
+
+fn hash_bytes(piece: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(piece);
+    hasher.finalize().into()
 }
