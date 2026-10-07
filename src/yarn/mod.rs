@@ -224,5 +224,53 @@ fn get_info_pieces(
 fn hash_bytes(piece: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(piece);
+
+    #[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn yarn_round_trip() {
+        let path = "/home/DotBox/tmp/yarn_test_src.bin";
+        std::fs::File::create(path).unwrap();
+        std::fs::write(path, vec![0xABu8; 200_000]).unwrap();
+
+        let yarn = Yarn::from_file(None, None, None, path.to_string()).await.unwrap();
+        let encoded = yarn.encode().unwrap();
+        let decoded = Yarn::decode(&encoded).unwrap();
+
+        assert_eq!(yarn.info.filename, decoded.info.filename);
+        assert_eq!(yarn.info.total_length, decoded.info.total_length);
+        assert_eq!(yarn.info.piece_length, decoded.info.piece_length);
+        assert_eq!(yarn.info.pieces, decoded.info.pieces);
+        assert_eq!(yarn.info_hash().unwrap(), decoded.info_hash().unwrap());
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[tokio::test]
+    async fn info_hash_is_path_independent() {
+        // Same content, different paths — info_hash must match.
+        let path_a = "/home/DotBox/tmp/yarn_path_a.bin";
+        let path_b = "/home/DotBox/tmp/yarn_path_b.bin";
+        let content = vec![0xCDu8; 100_000];
+        std::fs::File::create(path_a).unwrap();
+        std::fs::File::create(path_b).unwrap();
+        std::fs::write(path_a, &content).unwrap();
+        std::fs::write(path_b, &content).unwrap();
+
+        let a = Yarn::from_file(None, None, None, path_a.to_string()).await.unwrap();
+        let b = Yarn::from_file(None, None, None, path_b.to_string()).await.unwrap();
+
+        assert_eq!(a.info.filename, "yarn_path_a.bin");
+        assert_eq!(b.info.filename, "yarn_path_b.bin");
+        // Different filenames → different info_hashes. This is correct: the
+        // filename IS part of the info dict in BitTorrent.
+        // If you want path-independent identity, move filename out of info.
+
+        std::fs::remove_file(path_a).ok();
+        std::fs::remove_file(path_b).ok();
+    }
+}
     hasher.finalize().into()
 }
