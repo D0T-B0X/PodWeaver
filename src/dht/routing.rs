@@ -22,7 +22,10 @@ impl Bucket {
             return;
         }
 
-        if self.nodes.len() >= K { return; }
+        if self.nodes.len() < K {
+            self.nodes.push(node);
+            return;
+        }
 
         if  let Some(last_node) = self.nodes.last() {
             match last_node.status {
