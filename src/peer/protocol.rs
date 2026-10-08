@@ -11,17 +11,17 @@ use crate::yarn::bencode::BencodeMap;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {
-    // Establish a connection with another peer
+    // Connection
     Handshake { 
         node_id: NodeID, 
         info_hash: InfoHash, 
         listen_port: u16,
     },
 
-    // Peer preference control
+    // Peer Control
     Choke, Unchoke, Interested, NotInterested,
 
-    // New peer-2-peer information sharing
+    // Peer inventory
     Have { 
         piece_index: u32, 
     }, 
@@ -29,7 +29,7 @@ pub enum Message {
         bits: Vec<u8>,
     },
     
-    // Data transfer requests
+    // Peer Data Transfer
     Request { 
         piece_index: u32, 
         offset: u64, 
@@ -46,7 +46,7 @@ pub enum Message {
         length: u64,
     },
 
-    // PEX commands
+    // Peer Exchange
     PexRequest,
     PexResponse { 
         added: Vec<SocketAddr>, 
