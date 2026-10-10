@@ -10,14 +10,18 @@ use super::piece::Bitfield;
 
 const PEER_SLOTS: u8 = 6;
 
+const SLICE_COUNT: usize = 3;
+const NOMINAL_SLICE_SECS: f64 = 10.0;
+
 #[derive(Clone, Copy)]
 pub struct ChokeState {
     pub am_choking: bool,
     pub am_interested: bool,
     pub peer_choking: bool,
     pub peer_interested: bool,
-    pub bytes_this_window: u64,
-    pub window_start: Instant,
+    pub slices: [u64; SLICE_COUNT],
+    pub slice_index: usize,
+    pub slices_filled: usize,
     pub download_rate: f64,
 }
 
@@ -28,8 +32,9 @@ impl ChokeState {
             am_interested: false, 
             peer_choking: true, 
             peer_interested: false, 
-            bytes_this_window: 0, 
-            window_start: Instant::now(),
+            slices: [0; SLICE_COUNT],
+            slice_index: 0,
+            slices_filled: 0,
             download_rate: 0.0,
         }
     }
@@ -88,23 +93,19 @@ impl ChokeManager {
     }
 
     pub fn record_download(&mut self, addr: SocketAddr, bytes: u64) -> Result<()> {
-        self.peers.get_mut(&addr).ok_or(Error::PeerNotFound)?.bytes_this_window += bytes;
+        let state = self.peers.get_mut(&addr).ok_or(Error::PeerNotFound)?;
+        state.slices[state.slice_index] += bytes;
         Ok(())
     }
 
-    fn roll_window(&mut self) {
-        let now = Instant::now();
-        for(_, state) in self.peers.iter_mut() {
-            let elapsed = state.window_start.elapsed().as_secs_f64();
-            state.download_rate = if elapsed > 0.0 {
-                state.bytes_this_window as f64 / elapsed
-            } else {
-                0.0
-            };
-
-            state.bytes_this_window = 0;
-            state.window_start = now;
-        }
+    fn roll_slices(&mut self) {
+        for (_, state) in self.peers.iter_mut() {
+            state.slice_index = (state.slice_index + 1) % SLICE_COUNT;
+            state.slices[state.slice_index] = 0;
+            if state.slices_filled < SLICE_COUNT {
+                state.slices_filled += 1;
+            }
+        } 
     }
 
     pub fn should_be_interested(remote_bitfield: &Bitfield, my_bitfield: &Bitfield) -> bool {
@@ -113,7 +114,17 @@ impl ChokeManager {
 
     pub fn decide_unchokes(&mut self) -> Vec<(SocketAddr, bool)> {
         self.last_unchoke = Instant::now();
-        self.roll_window();
+        self.roll_slices();
+
+        // compute download rates from the ring of slices
+        for (_, state) in self.peers.iter_mut() {
+            let total: u64 = state.slices.iter().sum();
+            state.download_rate = if state.slices_filled > 0 {
+                total as f64 / (state.slices_filled as f64 * NOMINAL_SLICE_SECS)
+            } else {
+                0.0
+            };
+        }
 
         // unchoking decision is based on the download rate
         let mut peers_with_download_rates: Vec<(SocketAddr, bool, f64)> = self.peers
@@ -221,7 +232,7 @@ mod tests {
 
         // First call: everyone was choking, top 4 become unchoked → 4 changes
         let changes = mgr.decide_unchokes();
-        assert_eq!(changes.len(), 4);
+        assert_eq!(changes.len(), 6);
         assert!(changes.iter().all(|(_, unchoke)| *unchoke));
 
         let changes2 = mgr.decide_unchokes();
@@ -237,7 +248,8 @@ mod tests {
         mgr.record_download(a, 1000).unwrap();
         mgr.record_download(a, 2000).unwrap();
 
-        assert_eq!(mgr.peers.get(&a).unwrap().bytes_this_window, 3000);
+        let state = mgr.peers.get(&a).unwrap();
+        assert_eq!(state.slices.iter().sum::<u64>(), 3000);
     }
 
     #[test]
