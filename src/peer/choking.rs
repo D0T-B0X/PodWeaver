@@ -189,6 +189,14 @@ impl ChokeManager {
         Err(Error::PeerNotFound)
     }
 
+    pub fn am_interested(&self, addr: SocketAddr) -> Result<bool> {
+        if let Some(peer) = self.peers.get(&addr) {
+            return Ok(peer.am_interested);
+        }
+
+        Err(Error::PeerNotFound)
+    }
+
     pub fn peer_is_interested(&self, addr: SocketAddr) -> Result<bool> {
         if let Some(peer) = self.peers.get(&addr) {
             return Ok(peer.peer_interested);
@@ -207,6 +215,11 @@ impl ChokeManager {
 
     pub fn secs_since_last_unchoke(&self) -> u64 {
         self.last_unchoke.elapsed().as_secs()
+    }
+
+    // for testing
+    pub fn pod_addrs(&self) -> Vec<SocketAddr> {
+        self.peers.keys().copied().collect()
     }
 
     pub fn secs_since_last_optimistic_unchoke(&self) -> u64 {
