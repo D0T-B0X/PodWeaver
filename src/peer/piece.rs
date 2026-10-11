@@ -7,7 +7,7 @@ use crate::types::Result;
 const BLOCK_LENGTH: usize = 16_384;
 const ENDGAME_THRESHOLD: u32 = 6;
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum PieceStatus {
     Complete,
     InFlight { 
@@ -29,6 +29,13 @@ impl Bitfield {
         Self {
             bits: vec![0u8; bytes],
             piece_count: piece_count as u32, 
+        }
+    }
+
+    pub fn from_bytes(bits: Vec<u8>, piece_count: usize) -> Self {
+        Self {
+            bits,
+            piece_count: piece_count as u32
         }
     }
 
@@ -77,7 +84,7 @@ impl Bitfield {
         self.piece_count - self.count_ones()
     }
 
-    fn count_ones(&self) -> u32 {
+    pub fn count_ones(&self) -> u32 {
         self.bits.iter().map(|b| b.count_ones()).sum()
     }
 }
@@ -241,19 +248,19 @@ impl PieceManager {
 
     /// set the piece state as complete
     pub fn mark_complete(&mut self, piece: u32) -> Result<()> {
-        match &self.piece_state[piece as usize] {
+        let idx = piece as usize;
+
+        match &self.piece_state[idx] {
             PieceStatus::Missing => {
                 return Err(Error::PieceCompletionImpossibleWithoutRequest);
-            },
-
+            }
             PieceStatus::Complete => {
                 return Err(Error::PieceAlreadyComplete);
-            },
-
-            PieceStatus::InFlight { .. } => {}, // fall through and mark complete
+            }
+            PieceStatus::InFlight { .. } => {}
         }
 
-        self.piece_state[piece as usize] = PieceStatus::Complete;
+        self.piece_state[idx] = PieceStatus::Complete;
         self.bitfield.set(piece);
         Ok(())
     }
@@ -275,6 +282,45 @@ impl PieceManager {
 
     pub fn progress(&self) -> (u32, u32) {
         (self.bitfield.count_ones(), self.piece_count)
+    }
+
+    pub fn exists(&self, piece_index: u32) -> bool {
+        if piece_index >= self.piece_count {
+            return false;
+        }
+        self.piece_state[piece_index as usize] == PieceStatus::Complete
+    }
+
+    pub fn block_offset(&self, block: u64) -> u64 {
+        block * BLOCK_LENGTH as u64
+    }
+
+    pub fn block_length(&self, piece: u32, block: u32) -> u64 {
+        let piece_offset = piece as u64 * self.piece_length as u64;
+        let block_offset = piece_offset + block as u64 * BLOCK_LENGTH as u64;
+
+        (self.total_length - block_offset).min(BLOCK_LENGTH as u64)
+    }
+
+    pub fn block_exists(&self, piece_index: u32, block: u64) -> bool {
+        if piece_index >= self.piece_count {
+            return false;
+        }
+        match &self.piece_state[piece_index as usize] {
+            PieceStatus::Complete => return true,
+            PieceStatus::Missing => return false,
+            PieceStatus::InFlight { blocks, .. } => { 
+                return blocks[block as usize].is_some();
+            }
+        }
+    }
+
+    pub fn cancel_request(&mut self, piece: u32, block: u32, from: SocketAddr) {
+        if let PieceStatus::InFlight { requested_from, .. } = &mut self.piece_state[piece as usize] {
+            if let Some(v) = requested_from.get_mut(block as usize) {
+                v.retain(|a| *a != from);
+            }
+        }
     }
 
     fn block_count_for(&self, index: u32) -> usize {
