@@ -505,6 +505,12 @@ impl Connection {
             return Ok(());
         }
 
+        // do not send the block if the receiver is choked
+        match self.choke_manager.lock().unwrap().am_uploading_to(self.pod_addr) {
+            Ok(b) => if b { },
+            _ => return Ok(()),
+        }
+
         let global_offset = piece_start + offset;
 
         let spool = self.spool.clone();
@@ -598,7 +604,7 @@ impl Connection {
         Ok(())
     }
 
-    async fn refill_pipeline(&mut self) -> Result<()> {
+    async fn refill_pipeline(&mut self) -> Result<()> {        
         if !self.choke_manager.lock().unwrap().am_interested(self.pod_addr)? {
             return Ok(())
         }
