@@ -224,6 +224,8 @@ fn get_info_pieces(
 fn hash_bytes(piece: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(piece);
+    hasher.finalize().into()
+}
 
 #[cfg(test)]
 mod tests {
@@ -271,6 +273,4 @@ mod tests {
         std::fs::remove_file(path_a).ok();
         std::fs::remove_file(path_b).ok();
     }
-}
-    hasher.finalize().into()
 }

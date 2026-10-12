@@ -8,7 +8,6 @@ pub mod storage;
 pub mod transport;
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -25,7 +24,6 @@ use crate::transport::Transport;
 use crate::transport::contact::Contact;
 use crate::transport::pending_map::PendingMap;
 use crate::types::{InfoHash, NodeID, Result};
-use crate::yarn::Yarn;
 
 pub struct Engine {
     runtime: RuntimeManager,
@@ -113,7 +111,6 @@ impl Engine {
         let listen_port = pod_manager.listen_port;
 
         let pm = pod_manager.clone();
-        let tok = root_token.clone();
         spawner.spawn(move |_| async move {
             if let Err(e) = pm.run().await {
                 eprintln!("pod_manager.run exited: {e:?}");
