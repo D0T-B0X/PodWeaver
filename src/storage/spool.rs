@@ -2,6 +2,7 @@ use std::fs;
 use std::io::Seek;
 use std::io::Read;
 use std::io::SeekFrom;
+use std::io::Write;
 
 use crate::error::Error;
 use crate::types::Result;
@@ -49,5 +50,30 @@ impl Spool {
 
         self.chunk_offset = self.chunk_offset + bytes.len() as u64;
         Ok(bytes)
+    }
+
+    pub fn read_block(&self, offset: u64, length: u64) -> Result<Vec<u8>> {
+        let mut file = fs::File::open(&self.filepath)?;
+        file.seek(SeekFrom::Start(offset))?;
+
+        let mut bytes = vec![0u8; length as usize];
+        file.take(length).read_exact(&mut bytes)?;
+
+        Ok(bytes)
+    }
+
+    pub fn write_block(&self, offset: u64, bytes: &[u8]) -> Result<()> {
+        let mut file = fs::OpenOptions::new()   
+            .write(true)
+            .open(&self.filepath)?;
+
+        file.seek(SeekFrom::Start(offset))?;
+        file.write_all(bytes)?;
+        Ok(())
+    }
+
+    pub fn write_piece(&self, piece_index: u32, bytes: &[u8]) -> Result<()> {
+        let offset = piece_index as u64 * self.piece_length;
+        self.write_block(offset, bytes)
     }
 }
