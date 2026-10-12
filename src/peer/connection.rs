@@ -22,6 +22,7 @@ use crate::types::InfoHash;
 use crate::storage::spool::Spool;
 
 use super::needle;
+use super::pex::Pex;
 use super::choking::*;
 use super::protocol::*;
 use super::piece::Bitfield;
@@ -57,6 +58,10 @@ pub struct Connection {
 
     // connection state
     pub in_flight: HashMap<(u32, u32), Instant>,
+    pub last_activity: Instant,
+
+    // pex
+    pub pex: Arc<Mutex<Pex>>,
 
     // channels
     pub outbound_tx: mpsc::Sender<Message>,
@@ -81,6 +86,7 @@ impl Connection {
         piece_manager: Arc<Mutex<PieceManager>>,
         choke_manager: Arc<Mutex<ChokeManager>>,
         spool: Spool,
+        pex: Arc<Mutex<Pex>>,
         have_tx: broadcast::Sender<u32>,
         router: FabricHandle,
         cancel_token: CancellationToken,
@@ -96,6 +102,7 @@ impl Connection {
             piece_manager,
             choke_manager,
             spool,
+            pex,
             have_tx,
             router,
             cancel_token,
@@ -117,6 +124,7 @@ impl Connection {
         piece_manager: Arc<Mutex<PieceManager>>,
         choke_manager: Arc<Mutex<ChokeManager>>,
         spool: Spool,
+        pex: Arc<Mutex<Pex>>,
         have_tx: broadcast::Sender<u32>,
         router: FabricHandle,
         cancel_token: CancellationToken,
@@ -131,6 +139,7 @@ impl Connection {
             piece_manager,
             choke_manager,
             spool,
+            pex,
             have_tx,
             router,
             cancel_token,
@@ -152,6 +161,7 @@ impl Connection {
         piece_manager: Arc<Mutex<PieceManager>>,
         choke_manager: Arc<Mutex<ChokeManager>>,
         spool: Spool,
+        pex: Arc<Mutex<Pex>>,
         have_tx: broadcast::Sender<u32>,
         router: FabricHandle,
         cancel_token: CancellationToken,
@@ -172,8 +182,10 @@ impl Connection {
             choke_manager,
             piece_manager,
             spool,
+            pex,
             have_tx,
             in_flight: HashMap::new(),
+            last_activity: Instant::now(),
             outbound_tx,
             have_rx,
             router,
@@ -232,14 +244,18 @@ impl Connection {
         let reader_handle = tokio::spawn(async move {
             let mut reader = reader;
             loop {
-                match Self::read_message(&mut reader).await {
-                    Ok(m) => {
+                match tokio::time::timeout(
+                    Duration::from_secs(30),
+                    Self::read_message(&mut reader),
+                ).await {
+                    Ok(Ok(m)) => {
                         if msg_tx.send(Ok(m)).await.is_err() { break; }
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         let _ = msg_tx.send(Err(e)).await;
                         break;
                     }
+                    Err(_elapsed) => break,   // read timed out
                 }
             }
         });
@@ -255,6 +271,7 @@ impl Connection {
                     match msg {
                         Some(Ok(m)) => {
                             if self.handle_message(m).await.is_err() { break; }
+                            self.last_activity = Instant::now();
                         }
                         Some(Err(_)) | None => break,
                     }
@@ -271,6 +288,9 @@ impl Connection {
 
                 _ = ticker.tick() => {
                     self.check_timeouts();
+                    if self.last_activity.elapsed() > Duration::from_secs(120) {
+                        break;
+                    }
                     if self.refill_pipeline().await.is_err() { break; }
                 }
             }
@@ -332,14 +352,19 @@ impl Connection {
             },
 
             Message::PexRequest => {
+                let sample = self.pex.lock().unwrap().sample(50);
                 self.outbound_tx.send(Message::PexResponse {
-                    added: Vec::new(),
+                    added: sample,
+
+                    // TODO => Add dead peers and sample them from the list
                     dropped: Vec::new(),
                 }).await.map_err(|_| Error::MessageNotSent)?;
             },
 
-            Message::PexResponse { .. } => {
-                // TODO => Setup Pex response
+            Message::PexResponse { added, dropped } => {
+                let mut pex = self.pex.lock().unwrap();
+                pex.add(added);
+                pex.remove(dropped);
             }
         };
         Ok(())
@@ -503,6 +528,16 @@ impl Connection {
     async fn handle_piece(&mut self, piece_index: u32, offset: u64, data: Vec<u8>) -> Result<()> {
         let block = offset / BLOCK_LENGTH as u64;
 
+        // verify offsets
+        let (piece_len, total_len) = {
+            let m = self.piece_manager.lock().unwrap();
+            (m.piece_length as u64, m.total_length)
+        };
+        let piece_start = piece_index as u64 * piece_len;
+        if piece_start >= total_len { return Ok(()); }
+        let this_piece_len = (total_len - piece_start).min(piece_len);
+        if offset >= this_piece_len { return Ok(()); }
+
         // duplicate pieces are ignored
         if self.piece_manager.lock().unwrap().block_exists(piece_index, block) {
             return Ok(());
@@ -645,6 +680,7 @@ mod tests {
     }
 
     const TEST_FILE_SIZE: usize = 64 * 1024;
+    const PEX_POOL_SIZE: usize = 100;
 
     fn test_content() -> Vec<u8> {
         (0..TEST_FILE_SIZE).map(|i| (i % 251) as u8).collect()
@@ -657,6 +693,13 @@ mod tests {
         (Arc::new(yarn), path)
     }
 
+    /// Placeholder Pex for tests. The connection tests never add addresses
+    /// to the pool, so `me` and size don't matter here.
+    fn dummy_pex() -> Arc<Mutex<Pex>> {
+        let me: SocketAddr = "0.0.0.0:0".parse().unwrap();
+        Arc::new(Mutex::new(Pex::new(me, PEX_POOL_SIZE)))
+    }
+
     /// Spawn a router task and return a handle. In the real code the router
     /// is spawned by YarnFabric::new; here we just need something that
     /// drains events so `try_send` on the handle doesn't fail.
@@ -667,7 +710,7 @@ mod tests {
                 // drop events; nothing to route to in the test
             }
         });
-        FabricHandle { tx }
+        FabricHandle { tx}
     }
 
     struct PeerTestEnv {
@@ -733,6 +776,7 @@ mod tests {
             yarn.info.total_length,
         )
         .unwrap();
+        let seeder_pex = dummy_pex();
         let (seeder_have_tx, _) = broadcast::channel(64);
         let seeder_cancel = CancellationToken::new();
 
@@ -747,6 +791,7 @@ mod tests {
             yarn.info.total_length,
         )
         .unwrap();
+        let leecher_pex = dummy_pex();
         let (leecher_have_tx, _) = broadcast::channel(64);
         let leecher_cancel = CancellationToken::new();
 
@@ -769,6 +814,7 @@ mod tests {
         let seeder_router = spawn_test_router();
         let leecher_router = spawn_test_router();
 
+        let seeder_cancel_cl = seeder_cancel.clone();
         let seeder_handle = tokio::spawn({
             let yarn = yarn.clone();
             async move {
@@ -797,14 +843,16 @@ mod tests {
                     seeder_piece,
                     seeder_choke,
                     seeder_spool,
+                    seeder_pex,
                     seeder_have_tx,
                     seeder_router,
-                    seeder_cancel.clone(),
+                    seeder_cancel_cl,
                 )
                 .await
             }
         });
 
+        let leecher_cancel_cl = leecher_cancel.clone();
         let leecher_handle = tokio::spawn({
             let yarn = yarn.clone();
             async move {
@@ -817,9 +865,10 @@ mod tests {
                     leecher_piece,
                     leecher_choke,
                     leecher_spool,
+                    leecher_pex,
                     leecher_have_tx,
                     leecher_router,
-                    leecher_cancel.clone(),
+                    leecher_cancel_cl,
                 )
                 .await
             }
@@ -878,6 +927,7 @@ mod tests {
             yarn_a.info.total_length,
         )
         .unwrap();
+        let seeder_pex = dummy_pex();
         let (seeder_have_tx, _) = broadcast::channel(16);
         let seeder_cancel = CancellationToken::new();
 
@@ -891,6 +941,7 @@ mod tests {
             yarn_b.info.total_length,
         )
         .unwrap();
+        let leecher_pex = dummy_pex();
         let (leecher_have_tx, _) = broadcast::channel(16);
         let leecher_cancel = CancellationToken::new();
 
@@ -926,6 +977,7 @@ mod tests {
                 seeder_piece,
                 seeder_choke,
                 seeder_spool,
+                seeder_pex,
                 seeder_have_tx,
                 seeder_router,
                 seeder_cancel_cl,
@@ -944,6 +996,7 @@ mod tests {
                 leecher_piece,
                 leecher_choke,
                 leecher_spool,
+                leecher_pex,
                 leecher_have_tx,
                 leecher_router,
                 leecher_cancel_cl,
