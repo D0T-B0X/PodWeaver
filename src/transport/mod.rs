@@ -3,13 +3,13 @@ pub mod pending_map;
 
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio::sync::watch;
 use std::time::Duration;
 use tokio::time::timeout;
 use std::net::SocketAddr;
 use tokio::sync::oneshot;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::AtomicU16;
+use tokio_util::sync::CancellationToken;
 
 use contact::Contact;
 use crate::error::Error;
@@ -99,9 +99,9 @@ impl Transport {
     pub async fn run(
         self, 
         queries: mpsc::Sender<IncomingQuery>, 
-        mut stop: watch::Receiver<bool>
+        cancel_token: CancellationToken,
     ) {
-        if *stop.borrow() {
+        if cancel_token.is_cancelled() {
             return;
         }
 
@@ -109,7 +109,7 @@ impl Transport {
         let mut buffer = [0u8; 8192];
         loop {
             tokio::select! {
-                _ = stop.changed() => return,
+                _ = cancel_token.cancelled() => return,
                 res = self.contact.receive(&mut buffer) => {
                     let Ok((len, from)) = res else { continue };
                     let Ok(msg) = decode_message(&buffer[..len]) else { continue };
@@ -145,14 +145,14 @@ mod tests {
     use super::*;
     use crate::types::NodeID;
 
-    async fn start(id: NodeID) -> (Transport, SocketAddr, mpsc::Receiver<IncomingQuery>, watch::Sender<bool>) {
+    async fn start(id: NodeID) -> (Transport, SocketAddr, mpsc::Receiver<IncomingQuery>, CancellationToken) {
         let contact = Contact::with_node(id, "127.0.0.1:0").await.unwrap();
         let addr = contact.local_addr().unwrap();
         let t = Transport::new(contact, PendingMap::new());
         let (qtx, qrx) = mpsc::channel(16);
-        let (stop_tx, stop_rx) = watch::channel(false);
-        tokio::spawn(t.clone().run(qtx, stop_rx));
-        (t, addr, qrx, stop_tx)
+        let cancel_token = CancellationToken::new();
+        tokio::spawn(t.clone().run(qtx, cancel_token.clone()));
+        (t, addr, qrx, cancel_token)
     }
 
     #[tokio::test]
