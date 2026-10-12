@@ -55,7 +55,7 @@ impl TokenStore {
     }
 
     fn verify_rotation(&mut self) {
-        if self.last_rotation.elapsed() < ROTATION_INTERVAL {
+        if self.last_rotation.elapsed() >= ROTATION_INTERVAL {
             self.prev_secret = self.curr_secret;
             self.curr_secret = rand::random::<[u8; 32]>();
             self.last_rotation = Instant::now();
