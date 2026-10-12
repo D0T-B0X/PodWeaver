@@ -63,6 +63,7 @@ impl Bitfield {
         self.bits[byte] = self.bits[byte] | mask;
     }
 
+    /// set all pieces in the bitfield to `has`
     pub fn full(&mut self) {
         // fill up the bitfield with 1s
         let byte_count = self.piece_count.div_ceil(8);
