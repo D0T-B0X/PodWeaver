@@ -6,13 +6,13 @@ use std::net::SocketAddr;
 use std::collections::HashMap;
 
 use tokio::sync::mpsc;
-use tokio::sync::watch;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 use tokio::net::TcpStream;
 use tokio::sync::broadcast;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
+use tokio_util::sync::CancellationToken;
 
 use crate::yarn::Yarn;
 use crate::error::Error;
@@ -26,6 +26,7 @@ use super::choking::*;
 use super::protocol::*;
 use super::piece::Bitfield;
 use super::piece::PieceManager;
+use super::FabricHandle;
 
 const MAX_IN_FLIGHT: u8 = 8;
 const TICK: Duration = Duration::from_millis(500);
@@ -38,7 +39,7 @@ pub struct Connection {
     pub our_id: NodeID,
     pub listen_port: u16,
     pub info_hash: InfoHash,
-    
+
     // pod information
     pub pod_addr: SocketAddr,
     pub pod_bitfield: Bitfield,
@@ -60,12 +61,17 @@ pub struct Connection {
     // channels
     pub outbound_tx: mpsc::Sender<Message>,
     pub have_rx: broadcast::Receiver<u32>,
-    pub stop: watch::Receiver<bool>, 
+    pub router: FabricHandle,
+    pub cancel_token: CancellationToken,
+
+    // for the accept path: the handshake we already read
+    pub pre_read_handshake: Option<Message>,
 }
 
 impl Connection {
 
     /// Connect to an online pod in the swarm
+    #[allow(clippy::too_many_arguments)]
     pub async fn connect(
         addr: SocketAddr,
         our_id: NodeID,
@@ -76,39 +82,44 @@ impl Connection {
         choke_manager: Arc<Mutex<ChokeManager>>,
         spool: Spool,
         have_tx: broadcast::Sender<u32>,
-        stop: watch::Receiver<bool>,
+        router: FabricHandle,
+        cancel_token: CancellationToken,
     ) -> Result<()> {
         let stream = TcpStream::connect(addr).await?;
         let (mut connection, stream, outbound_rx) = Self::new(
-            stream, 
-            addr, 
-            our_id, 
-            listen_port, 
-            info_hash, 
-            yarn, 
-            piece_manager, 
-            choke_manager, 
-            spool, 
-            have_tx, 
-            stop
+            stream,
+            addr,
+            our_id,
+            listen_port,
+            info_hash,
+            yarn,
+            piece_manager,
+            choke_manager,
+            spool,
+            have_tx,
+            router,
+            cancel_token,
         );
 
         let (reader, writer) = stream.into_split();
         connection.run(reader, writer, outbound_rx).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn accept(
         stream: TcpStream,
         pod_addr: SocketAddr,
         our_id: NodeID,
         listen_port: u16,
         info_hash: InfoHash,
+        pre_read_handshake: Message,
         yarn: Arc<Yarn>,
         piece_manager: Arc<Mutex<PieceManager>>,
         choke_manager: Arc<Mutex<ChokeManager>>,
         spool: Spool,
         have_tx: broadcast::Sender<u32>,
-        stop: watch::Receiver<bool>,
+        router: FabricHandle,
+        cancel_token: CancellationToken,
     ) -> Result<()> {
         let (mut connection, stream, outbound_rx) = Self::new(
             stream,
@@ -121,13 +132,16 @@ impl Connection {
             choke_manager,
             spool,
             have_tx,
-            stop
+            router,
+            cancel_token,
         );
+        connection.pre_read_handshake = Some(pre_read_handshake);
 
         let (reader, writer) = stream.into_split();
         connection.run(reader, writer, outbound_rx).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new(
         stream: TcpStream,
         pod_addr: SocketAddr,
@@ -139,7 +153,8 @@ impl Connection {
         choke_manager: Arc<Mutex<ChokeManager>>,
         spool: Spool,
         have_tx: broadcast::Sender<u32>,
-        stop: watch::Receiver<bool>,
+        router: FabricHandle,
+        cancel_token: CancellationToken,
     ) -> (Self, TcpStream, mpsc::Receiver<Message>) {
         let (outbound_tx, outbound_rx) = mpsc::channel(64);
         let have_rx = have_tx.subscribe();
@@ -152,7 +167,7 @@ impl Connection {
             pod_addr,
             pod_bitfield: Bitfield::new(piece_count),
             pod_id: NodeID([0u8; 32]), // dummy ID
-            pod_listen_addr: None, // changed after handshake
+            pod_listen_addr: None,     // changed after handshake
             yarn,
             choke_manager,
             piece_manager,
@@ -161,11 +176,13 @@ impl Connection {
             in_flight: HashMap::new(),
             outbound_tx,
             have_rx,
-            stop
+            router,
+            cancel_token,
+            pre_read_handshake: None,
         }, stream, outbound_rx)
     }
 
-    async fn run<R, W>(&mut self, mut reader: R, writer: W, rx: mpsc::Receiver<Message>) -> Result<()> 
+    async fn run<R, W>(&mut self, mut reader: R, writer: W, rx: mpsc::Receiver<Message>) -> Result<()>
     where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
@@ -173,32 +190,40 @@ impl Connection {
         // initialize the writer task so the connection can send out messages
         let write_task = tokio::spawn(Self::write_loop(writer, rx));
 
-        // perform pod handshake
-        self.handshake(&mut reader).await?;
+        // perform pod handshake (may use a pre-read message from accept path)
+        let pre_read = self.pre_read_handshake.take();
+        self.handshake(&mut reader, pre_read).await?;
 
         // add the verified pod to the choke manager's table
         self.choke_manager.lock().unwrap().add_peer(self.pod_addr);
+
+        // register with the fabric so the choke scheduler and other
+        // connections can deliver messages to us
+        self.router.register(self.pod_addr, self.outbound_tx.clone());
+
         self.pass_bitfield().await?;
 
         let result = self.read_loop(reader).await;
 
+        // cleanup
+        self.router.unregister(self.pod_addr);
         self.choke_manager.lock().unwrap().remove_peer(self.pod_addr);
         write_task.abort();
+
         result
     }
 
-    async fn write_loop<W>(mut writer: W, mut rx: mpsc::Receiver<Message>) -> Result<()> 
-    where 
+    async fn write_loop<W>(mut writer: W, mut rx: mpsc::Receiver<Message>) -> Result<()>
+    where
         W: AsyncWrite + Unpin + Send + 'static,
     {
         while let Some(message) = rx.recv().await {
             Self::write_message(&mut writer, &message).await?;
         }
-
         Ok(())
     }
 
-    async fn read_loop<R>(&mut self, reader: R) -> Result<()> 
+    async fn read_loop<R>(&mut self, reader: R) -> Result<()>
     where
         R: AsyncRead + Unpin + Send + 'static,
     {
@@ -210,7 +235,7 @@ impl Connection {
                 match Self::read_message(&mut reader).await {
                     Ok(m) => {
                         if msg_tx.send(Ok(m)).await.is_err() { break; }
-                    } 
+                    }
                     Err(e) => {
                         let _ = msg_tx.send(Err(e)).await;
                         break;
@@ -224,7 +249,7 @@ impl Connection {
 
         loop {
             tokio::select! {
-                _ = self.stop.changed() => return Ok(()),
+                _ = self.cancel_token.cancelled() => break,
 
                 msg = msg_rx.recv() => {
                     match msg {
@@ -368,28 +393,30 @@ impl Connection {
         Ok(())
     }
 
-    async fn handshake<R>(&mut self, reader: &mut R) -> Result<()> 
+    async fn handshake<R>(&mut self, reader: &mut R, pre_read: Option<Message>) -> Result<()>
     where
         R: AsyncRead + Unpin,
     {
         // perform a handshake with the remote pod
-        self.outbound_tx.send({
-            Message::Handshake { 
-                node_id: self.our_id, 
-                info_hash: self.info_hash, 
-                listen_port: self.listen_port 
-            }
+        self.outbound_tx.send(Message::Handshake {
+            node_id: self.our_id,
+            info_hash: self.info_hash,
+            listen_port: self.listen_port,
         })
         .await
         .map_err(|_| Error::MessageNotSent)?;
 
-        // wait for response
-        let pod_response = tokio::time::timeout(
-            HANDSHAKE_TIMEOUT, 
-            Self::read_message(reader)
-        )
-        .await
-        .map_err(|_| Error::ResponseTimedOut)??;
+        // wait for the peer's handshake — either pre-read by the accept path
+        // or read from the wire here
+        let pod_response = match pre_read {
+            Some(m) => m,
+            None => tokio::time::timeout(
+                HANDSHAKE_TIMEOUT,
+                Self::read_message(reader),
+            )
+            .await
+            .map_err(|_| Error::ResponseTimedOut)??,
+        };
 
         match pod_response {
             Message::Handshake { node_id, info_hash, listen_port } => {
@@ -410,8 +437,7 @@ impl Connection {
         Ok(())
     }
 
-    async fn pass_bitfield(&mut self) -> Result<()> 
-    {
+    async fn pass_bitfield(&mut self) -> Result<()> {
         let bits = {
             let piece_manager = self.piece_manager.lock().unwrap();
             if piece_manager.bitfield.count_ones() == 0 {
@@ -420,7 +446,7 @@ impl Connection {
             piece_manager.bitfield.bits.clone()
         };
         let message = Message::Bitfield { bits };
-        
+
         self.outbound_tx.send(message)
             .await
             .map_err(|_| Error::MessageNotSent)?;
@@ -438,7 +464,7 @@ impl Connection {
         };
 
         // error checks
-        if length == 0 || length > BLOCK_LENGTH as u64 { return Ok(()); } 
+        if length == 0 || length > BLOCK_LENGTH as u64 { return Ok(()); }
         let piece_start = piece_index as u64 * piece_len as u64;
         if piece_start >= total_len { return Ok(()); }
         let this_piece_len = (total_len - piece_start).min(piece_len as u64);
@@ -446,9 +472,12 @@ impl Connection {
             Some(e) => e,
             None => return Ok(()),
         };
-        if end > this_piece_len { 
-            eprintln!("[{}] bad request: piece={piece_index} offset={offset} len={length} piece_len={this_piece_len}", self.pod_addr);
-            return Ok(()); 
+        if end > this_piece_len {
+            eprintln!(
+                "[{}] bad request: piece={piece_index} offset={offset} len={length} piece_len={this_piece_len}",
+                self.pod_addr
+            );
+            return Ok(());
         }
 
         let global_offset = piece_start + offset;
@@ -460,10 +489,10 @@ impl Connection {
         .await
         .map_err(|_| Error::FileReadFailed)??;
 
-        self.outbound_tx.send(Message::Piece { 
-            piece_index, 
-            offset, 
-            data 
+        self.outbound_tx.send(Message::Piece {
+            piece_index,
+            offset,
+            data,
         })
         .await
         .map_err(|_| Error::MessageNotSent)?;
@@ -473,7 +502,7 @@ impl Connection {
 
     async fn handle_piece(&mut self, piece_index: u32, offset: u64, data: Vec<u8>) -> Result<()> {
         let block = offset / BLOCK_LENGTH as u64;
-        
+
         // duplicate pieces are ignored
         if self.piece_manager.lock().unwrap().block_exists(piece_index, block) {
             return Ok(());
@@ -488,12 +517,24 @@ impl Connection {
             piece_manager.record_block(piece_index, block as u32, data, self.pod_addr)
         };
 
-        // TODO => Implement call to module channel once implemented for cancellation
-        let (bytes, _cancel) = match record_result {
+        let (bytes, cancel) = match record_result {
             Ok(r) => r,
             Err(Error::BlockAlreadyReceived) => return Ok(()),
             Err(e) => return Err(e),
         };
+
+        // endgame: tell the other peers who had this block in flight to stop.
+        if !cancel.is_empty() {
+            let block_len = self.piece_manager.lock().unwrap()
+                .block_length(piece_index, block as u32);
+            for peer_addr in cancel {
+                self.router.send(peer_addr, Message::Cancel {
+                    piece_index,
+                    offset,
+                    length: block_len,
+                });
+            }
+        }
 
         let Some(b) = bytes else {
             self.refill_pipeline().await?;
@@ -504,7 +545,7 @@ impl Connection {
         let expected_hash = self.yarn.info.pieces[piece_index as usize];
         if Self::hash(&b) != expected_hash {
             self.piece_manager.lock().unwrap().mark_failed(piece_index)?;
-            return Err(Error::MaliciousPeer); 
+            return Err(Error::MaliciousPeer);
         }
 
         let global_offset = piece_index as u64 * self.yarn.info.piece_length as u64;
@@ -545,10 +586,10 @@ impl Connection {
                 (piece_manager.block_offset(block as u64), piece_manager.block_length(piece, block))
             };
 
-            self.outbound_tx.send(Message::Request { 
-                piece_index: piece, 
-                offset, 
-                length 
+            self.outbound_tx.send(Message::Request {
+                piece_index: piece,
+                offset,
+                length,
             }).await.map_err(|_| Error::MessageNotSent)?;
 
             self.in_flight.insert((piece, block), Instant::now());
@@ -561,14 +602,14 @@ impl Connection {
     fn check_timeouts(&mut self) {
         let now = Instant::now();
         let mut expired = Vec::new();
-        self.in_flight.retain(|&(piece, block), sent_at|{
+        self.in_flight.retain(|&(piece, block), sent_at| {
             if now.duration_since(*sent_at) < RESPONSE_TIMEOUT {
                 true
             } else {
                 expired.push((piece, block));
                 false
             }
-        }); 
+        });
 
         let mut piece_manager = self.piece_manager.lock().unwrap();
         for (piece, block) in expired {
@@ -587,6 +628,7 @@ impl Connection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::peer::FabricEvent;
     use std::sync::atomic::{AtomicU64, Ordering};
     use tokio::net::TcpListener;
 
@@ -615,12 +657,25 @@ mod tests {
         (Arc::new(yarn), path)
     }
 
+    /// Spawn a router task and return a handle. In the real code the router
+    /// is spawned by YarnFabric::new; here we just need something that
+    /// drains events so `try_send` on the handle doesn't fail.
+    fn spawn_test_router() -> FabricHandle {
+        let (tx, mut rx) = mpsc::channel::<FabricEvent>(64);
+        tokio::spawn(async move {
+            while let Some(_event) = rx.recv().await {
+                // drop events; nothing to route to in the test
+            }
+        });
+        FabricHandle { tx }
+    }
+
     struct PeerTestEnv {
         leecher_choke: Arc<Mutex<ChokeManager>>,
         leecher_piece: Arc<Mutex<PieceManager>>,
         seeder_choke: Arc<Mutex<ChokeManager>>,
-        seeder_stop: watch::Sender<bool>,
-        leecher_stop: watch::Sender<bool>,
+        seeder_stop: CancellationToken,
+        leecher_stop: CancellationToken,
         listen_addr: SocketAddr,
         seeder_handle: Option<tokio::task::JoinHandle<Result<()>>>,
         leecher_handle: Option<tokio::task::JoinHandle<Result<()>>>,
@@ -647,8 +702,8 @@ mod tests {
         }
 
         async fn teardown(mut self) {
-            let _ = self.seeder_stop.send(true);
-            let _ = self.leecher_stop.send(true);
+            self.seeder_stop.cancel();
+            self.leecher_stop.cancel();
 
             if let Some(h) = self.seeder_handle.take() {
                 let _ = tokio::time::timeout(Duration::from_secs(2), h).await;
@@ -679,7 +734,7 @@ mod tests {
         )
         .unwrap();
         let (seeder_have_tx, _) = broadcast::channel(64);
-        let (seeder_stop, _) = watch::channel(false);
+        let seeder_cancel = CancellationToken::new();
 
         // --- Leecher ---
         let leecher_path = unique_path("out");
@@ -693,14 +748,14 @@ mod tests {
         )
         .unwrap();
         let (leecher_have_tx, _) = broadcast::channel(64);
-        let (leecher_stop, _) = watch::channel(false);
+        let leecher_cancel = CancellationToken::new();
 
         // Clones kept alive by the test for observation.
         let leecher_choke_t = leecher_choke.clone();
         let leecher_piece_t = leecher_piece.clone();
         let seeder_choke_t = seeder_choke.clone();
-        let seeder_stop_t = seeder_stop.clone();
-        let leecher_stop_t = leecher_stop.clone();
+        let seeder_stop_t = seeder_cancel.clone();
+        let leecher_stop_t = leecher_cancel.clone();
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let listen_addr = listener.local_addr().unwrap();
@@ -709,29 +764,47 @@ mod tests {
         let seeder_id = NodeID([0xAA; 32]);
         let leecher_id = NodeID([0xBB; 32]);
 
-        let seeder_stop_rx = seeder_stop.subscribe();
+        // Each side gets its own router handle. In production this comes
+        // from the YarnFabric; in tests we spawn dummy routers that drain.
+        let seeder_router = spawn_test_router();
+        let leecher_router = spawn_test_router();
+
         let seeder_handle = tokio::spawn({
             let yarn = yarn.clone();
             async move {
-                let (stream, peer_addr) = listener.accept().await.unwrap();
+                // Accept path: read the handshake, then hand off to accept.
+                let (mut stream, peer_addr) = listener.accept().await.unwrap();
+
+                // Read the handshake frame
+                let mut header = [0u8; 4];
+                AsyncReadExt::read_exact(&mut stream, &mut header).await.unwrap();
+                let len = needle::parse_length(header).unwrap();
+
+                let mut payload = vec![0u8; len as usize];
+                AsyncReadExt::read_exact(&mut stream, &mut payload).await.unwrap();
+
+                let value = needle::decode_message(&payload).unwrap();
+                let handshake = Message::from_bencode(&value).unwrap();
+
                 Connection::accept(
                     stream,
                     peer_addr,
                     seeder_id,
                     listen_port,
                     info_hash,
+                    handshake,
                     yarn,
                     seeder_piece,
                     seeder_choke,
                     seeder_spool,
                     seeder_have_tx,
-                    seeder_stop_rx,
+                    seeder_router,
+                    seeder_cancel.clone(),
                 )
                 .await
             }
         });
 
-        let leecher_stop_rx = leecher_stop.subscribe();
         let leecher_handle = tokio::spawn({
             let yarn = yarn.clone();
             async move {
@@ -745,7 +818,8 @@ mod tests {
                     leecher_choke,
                     leecher_spool,
                     leecher_have_tx,
-                    leecher_stop_rx,
+                    leecher_router,
+                    leecher_cancel.clone(),
                 )
                 .await
             }
@@ -805,7 +879,7 @@ mod tests {
         )
         .unwrap();
         let (seeder_have_tx, _) = broadcast::channel(16);
-        let (seeder_stop, _) = watch::channel(false);
+        let seeder_cancel = CancellationToken::new();
 
         let out_b = unique_path("out");
         std::fs::write(&out_b, vec![0u8; yarn_b.info.total_length as usize]).unwrap();
@@ -818,32 +892,48 @@ mod tests {
         )
         .unwrap();
         let (leecher_have_tx, _) = broadcast::channel(16);
-        let (leecher_stop, _) = watch::channel(false);
+        let leecher_cancel = CancellationToken::new();
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let listen_addr = listener.local_addr().unwrap();
         let listen_port = listen_addr.port();
 
-        let seeder_stop_rx = seeder_stop.subscribe();
+        let seeder_router = spawn_test_router();
+        let leecher_router = spawn_test_router();
+
+        let seeder_cancel_cl = seeder_cancel.clone();
         let seeder_handle = tokio::spawn(async move {
-            let (stream, peer_addr) = listener.accept().await.unwrap();
+            let (mut stream, peer_addr) = listener.accept().await.unwrap();
+
+            let mut header = [0u8; 4];
+            AsyncReadExt::read_exact(&mut stream, &mut header).await.unwrap();
+            let len = needle::parse_length(header).unwrap();
+
+            let mut payload = vec![0u8; len as usize];
+            AsyncReadExt::read_exact(&mut stream, &mut payload).await.unwrap();
+
+            let value = needle::decode_message(&payload).unwrap();
+            let handshake = Message::from_bencode(&value).unwrap();
+
             Connection::accept(
                 stream,
                 peer_addr,
                 NodeID([0xAA; 32]),
                 listen_port,
                 info_hash_a,
+                handshake,
                 yarn_a,
                 seeder_piece,
                 seeder_choke,
                 seeder_spool,
                 seeder_have_tx,
-                seeder_stop_rx,
+                seeder_router,
+                seeder_cancel_cl,
             )
             .await
         });
 
-        let leecher_stop_rx = leecher_stop.subscribe();
+        let leecher_cancel_cl = leecher_cancel.clone();
         let leecher_handle = tokio::spawn(async move {
             Connection::connect(
                 listen_addr,
@@ -855,7 +945,8 @@ mod tests {
                 leecher_choke,
                 leecher_spool,
                 leecher_have_tx,
-                leecher_stop_rx,
+                leecher_router,
+                leecher_cancel_cl,
             )
             .await
         });
@@ -871,8 +962,8 @@ mod tests {
             leecher_result
         );
 
-        let _ = seeder_stop.send(true);
-        let _ = leecher_stop.send(true);
+        seeder_cancel.cancel();
+        leecher_cancel.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(2), seeder_handle).await;
 
         let _ = std::fs::remove_file(&path_a);
