@@ -60,4 +60,38 @@ pub enum Error {
     EmptyFile,
     #[error("Error, the file provided does not exist")]
     FileNotFound,
+    #[error("Error, IPv6 addresses are not yet supported")]
+    IPv6NotSupported,
+    #[error("Error, Request type is unrecognised")]
+    InvalidRequestType,
+    #[error("Error, An attempt was made to mark a missing piece complete without any requests")]
+    PieceCompletionImpossibleWithoutRequest,
+    #[error("Error, this piece was already complete")]
+    PieceAlreadyComplete,
+    #[error("Error, An attempt was made to mark a complete or missing piece as failed")]
+    InvalidFailAttempt,
+    #[error("Error, An operation was attempted on a piece that is not InFlight")]
+    InvalidPieceOperation,
+    #[error("Error, the queried block is already complete")]
+    BlockAlreadyReceived,
+    #[error("Error, The queried peer does not exist in the choke manager's table")]
+    PeerNotFound,
+    #[error("Error, The incoming frame is too large")]
+    FrameTooLarge,
+    #[error("Error, Unexpected response from remote pod")]
+    InvalidPodResponse,
+    #[error("Error, Response took too long")]
+    ResponseTimedOut,
+    #[error("Error, both pods attempted a connection at the same time")]
+    MutualDial,
+    #[error("Error, the message could not be sent because of some reason (wow really, what a great error message")]
+    MessageNotSent,
+    #[error("Error, the piece is not complete, there is atleast one block missing")]
+    BlockMissing,
+    #[error("Error, could not write bytes to file")]
+    FileWriteFailed,
+    #[error("Error, mismatched hash, likely a bad actor")]
+    MaliciousPeer,
+    #[error("Error, requested yarn does not exist on this pod")]
+    YarnNotFound,
 }
