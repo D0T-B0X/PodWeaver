@@ -30,8 +30,26 @@ impl From<&[u8]> for BencodeMap {
 impl From<u16> for BencodeMap {
     fn from(int: u16) -> Self { BencodeMap::Integer(int as i64) }
 }
+impl From<u32> for BencodeMap {
+    fn from(int: u32) -> Self { BencodeMap::Integer(int as i64) }
+}
+impl From<u64> for BencodeMap {
+    fn from(int: u64) -> Self { BencodeMap::Integer(int as i64) }
+}
 impl From<Vec<u8>> for BencodeMap {
     fn from(v: Vec<u8>) -> Self { BencodeMap::ByteString(v) }
+}
+impl From<Vec<SocketAddr>> for BencodeMap {
+    fn from(v: Vec<SocketAddr>) -> Self {
+        let mut bytes = Vec::with_capacity(6 * v.len());
+        for addr in v {
+            if let SocketAddr::V4(v4) = addr {
+                bytes.extend_from_slice(&v4.ip().octets());
+                bytes.extend_from_slice(&v4.port().to_be_bytes());
+            }
+        }
+        BencodeMap::ByteString(bytes)
+    }
 }
 impl From<String> for BencodeMap {
     fn from(s: String) -> Self { BencodeMap::ByteString(s.into_bytes()) }
