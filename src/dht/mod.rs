@@ -10,11 +10,11 @@ use tokio::sync::mpsc;
 use std::time::Duration;
 use std::net::SocketAddr;
 use std::collections::HashSet;
+use tokio_util::sync::CancellationToken;
 
 use routing::*;
 use node::Node;
 use krpc::QueryPayload;
-use tokio::sync::watch;
 use crate::error::Error;
 use crate::types::Result;
 use crate::types::NodeID;
@@ -147,15 +147,15 @@ impl DHT {
     // --------------------------------
 
     // Async runtime
-    pub async fn run(self, mut queries: mpsc::Receiver<IncomingQuery>, mut stop: watch::Receiver<bool>) -> Result<()> {
+    pub async fn run(self, mut queries: mpsc::Receiver<IncomingQuery>, cancel_token: CancellationToken) -> Result<()> {
         
-        if *stop.borrow() {
+        if cancel_token.is_cancelled() {
             return Ok(());
         }
 
         loop {
             tokio::select! {
-                _ = stop.changed() => return Ok(()),
+                _ = cancel_token.cancelled() => return Ok(()),
                 Some(q) = queries.recv() => {
                     let _ = self.touch(q.payload.sender_id(), q.from);
                     if let Ok(Some(resp)) = self.answer(&q.from, &q.payload) {
@@ -252,18 +252,18 @@ mod tests {
 
 use super::*;
     
-    async fn spawn_dht(id: NodeID) -> Result<(DHT, SocketAddr, watch::Sender<bool>)> {
+    async fn spawn_dht(id: NodeID) -> Result<(DHT, SocketAddr, CancellationToken)> {
         let contact = Contact::with_node(id, "127.0.0.1:0").await?;
         let addr = contact.local_addr().unwrap();
         let transport = Transport::new(contact, PendingMap::new());
         let dht = DHT::new(*transport.id(), transport.clone())?;
 
         let (qtx, qrx) = mpsc::channel(32);
-        let (stop_tx, stop_rx) = watch::channel(false);
-        tokio::spawn(transport.run(qtx, stop_rx.clone()));
-        tokio::spawn(dht.clone().run(qrx, stop_rx));
+        let cancel_token = CancellationToken::new();
+        tokio::spawn(transport.run(qtx, cancel_token.clone()));
+        tokio::spawn(dht.clone().run(qrx, cancel_token.clone()));
 
-        Ok((dht, addr, stop_tx))
+        Ok((dht, addr, cancel_token))
     }
 
     #[tokio::test]
