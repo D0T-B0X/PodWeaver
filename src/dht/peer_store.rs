@@ -10,15 +10,8 @@ use crate::types::InfoHash;
 const MAX_PEERS_PER_HASH: usize = 100;
 
 #[derive(Clone)]
-pub struct PeerEntry {
-    pub addr: SocketAddr,
-    pub tcp_port: u16,
-    pub last_seen: Instant,
-}
-
-#[derive(Clone)]
 pub struct PeerStore {
-    pub store: HashMap<InfoHash, Vec<PeerEntry>>,
+    pub store: HashMap<InfoHash, HashMap<SocketAddr, Instant>>,
     pub ttl: Duration,
 }
 
@@ -32,11 +25,16 @@ impl PeerStore {
 
     pub fn announce(&mut self, info_hash: &InfoHash, peer: SocketAddr) {
         let peers = self.store.entry(*info_hash).or_default();
+        peers.insert(peer, Instant::now());
 
-        if let Some(entry) = peers.iter_mut().find(|e| e.addr == peer) {
-            entry.last_seen = Instant::now();
-        } else if peers.len() < MAX_PEERS_PER_HASH {
-            peers.push(PeerEntry { addr: peer, tcp_port: 0, last_seen: Instant::now() });
+        if peers.len() > MAX_PEERS_PER_HASH {
+            if let Some(oldest) = peers
+                .iter()
+                .min_by_key(|(_, v)| **v)
+                .map(|(a, _)| *a) 
+            {
+                peers.remove(&oldest);
+            }
         }
     }
 
@@ -45,10 +43,10 @@ impl PeerStore {
         let ttl = self.ttl;
 
         if let Some(peers) = self.store.get_mut(info_hash) {
-            peers.retain(|entry| now.duration_since(entry.last_seen) < ttl);
+            peers.retain(|_, last_seen| now.duration_since(*last_seen) < ttl);
 
             if !peers.is_empty() {
-                return Some(peers.iter().map(|e| e.addr).collect());
+                return Some(peers.keys().copied().collect());
             }
         }
         None
