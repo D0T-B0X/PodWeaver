@@ -306,6 +306,13 @@ impl PieceManager {
         if piece_index >= self.piece_count {
             return false;
         }
+
+        let piece_len = (self.total_length - (piece_index as u64 * self.piece_length as u64))
+            .min(self.piece_length as u64);
+        let block_count = piece_len.div_ceil(BLOCK_LENGTH as u64);
+
+        if block >= block_count { return false; }
+
         match &self.piece_state[piece_index as usize] {
             PieceStatus::Complete => return true,
             PieceStatus::Missing => return false,
