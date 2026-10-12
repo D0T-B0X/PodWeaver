@@ -21,6 +21,7 @@ use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
 use pex::Pex;
+use piece::Bitfield;
 use protocol::Message;
 use piece::PieceManager;
 use choking::ChokeManager;
@@ -159,10 +160,17 @@ impl YarnFabric {
         output_path: PathBuf,
         spawner: &TaskSpawner,
         my_addr: SocketAddr,
+        seed: bool,
         stop: CancellationToken,
     ) -> Result<Arc<Self>> {
         let info_hash = yarn.info_hash()?;
-        let piece_manager = Arc::new(Mutex::new(PieceManager::new(&yarn)?));
+        let piece_manager = if seed {
+            let mut bitfield = Bitfield::new(yarn.info.pieces.len());
+            bitfield.full();
+            Arc::new(Mutex::new(PieceManager::resume(&yarn, bitfield)?))
+        } else {
+            Arc::new(Mutex::new(PieceManager::new(&yarn)?))
+        };
         let choke_manager = Arc::new(Mutex::new(ChokeManager::new()));
         let spool = Spool::new(
             output_path.to_str().ok_or(Error::UnexpectedFormat)?,
@@ -240,7 +248,7 @@ impl YarnFabric {
         let yarn = Arc::new(
             Yarn::from_file(author, creation_date, comments, path_str).await?,
         );
-        Self::new(yarn, source_path, spawner, my_addr, stop)
+        Self::new(yarn, source_path, spawner, my_addr, true, stop)
     }
 
     pub fn contains(&self, addr: SocketAddr) -> bool {
