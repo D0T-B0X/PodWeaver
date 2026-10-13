@@ -1,14 +1,14 @@
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 use std::net::SocketAddr;
+use std::net::SocketAddrV4;
 use std::collections::HashSet;
 
-use tokio::sync::Mutex;
-use tokio::io::BufReader;
 use tokio::net::TcpStream;
 use tokio::net::TcpListener;
+use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
-use tokio::io::AsyncBufReadExt;
 
 const MAX_NODES: usize = 20;
 const PING_INTERVAL: Duration = Duration::from_secs(120);
@@ -25,8 +25,8 @@ impl Registry {
     }
 
     /// add a new pod to the registry.
-    async fn insert(&self, addr: SocketAddr) -> bool {
-        let mut n = self.nodes.lock().await;
+    fn insert(&self, addr: SocketAddr) -> bool {
+        let mut n = self.nodes.lock().unwrap();
         if n.contains(&addr) {
             return true;
         }
@@ -37,16 +37,16 @@ impl Registry {
         true
     }
 
-    async fn snapshot(&self) -> Vec<SocketAddr> {
-        self.nodes.lock().await.iter().copied().collect()
+    fn snapshot(&self) -> Vec<SocketAddr> {
+        self.nodes.lock().unwrap().iter().copied().collect()
     }
 
-    async fn remove(&self, addr: SocketAddr) {
-        self.nodes.lock().await.remove(&addr);
+    fn remove(&self, addr: SocketAddr) {
+        self.nodes.lock().unwrap().remove(&addr);
     }
 
-    async fn len(&self) -> usize {
-        self.nodes.lock().await.len()
+    fn len(&self) -> usize {
+        self.nodes.lock().unwrap().len()
     }
 }
 
@@ -54,49 +54,18 @@ impl Registry {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bind = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "0.0.0.0:9000".to_string());
+        .unwrap_or_else(|| "0.0.0.0:9001".to_string());
 
     let reg = Registry::new();
 
-    // Active health check: TCP-connect to every node every PING_INTERVAL.
-    // Anything that doesn't accept the connection within PING_TIMEOUT is
-    // evicted, freeing its slot for the next PUT.
+
+    // Every PIN_INTERVAL, dead nodes are kicked from the registry to 
+    // make space for new insertions which is possible only through
+    // pings from any online node
     {
         let reg = reg.clone();
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(PING_INTERVAL);
-            tick.tick().await; // consume immediate first tick
-            loop {
-                tick.tick().await;
-
-                let peers = reg.snapshot().await;
-                let mut dead = Vec::new();
-
-                for addr in peers {
-                    let ok = tokio::time::timeout(
-                        PING_TIMEOUT,
-                        TcpStream::connect(addr),
-                    )
-                    .await
-                    .map(|r| r.is_ok())
-                    .unwrap_or(false);
-
-                    if !ok {
-                        dead.push(addr);
-                    }
-                }
-
-                for addr in &dead {
-                    reg.remove(*addr).await;
-                }
-
-                if !dead.is_empty() {
-                    eprintln!("ping sweep: evicted {}, {} online",
-                        dead.len(), reg.len().await);
-                } else {
-                    eprintln!("ping sweep: {} online", reg.len().await);
-                }
-            }
+            registry_refresh_loop(reg).await;
         });
     }
 
@@ -108,39 +77,114 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let reg = reg.clone();
         tokio::spawn(async move {
             if let Err(e) = handle(stream, reg).await {
-                eprintln!("conn error: {e:?}");
+                eprintln!("connection error: {e:?}");
             }
         });
     }
 }
 
 async fn handle(stream: TcpStream, reg: Registry) -> std::io::Result<()> {
-    let (r, mut w) = stream.into_split();
-    let mut reader = BufReader::new(r);
-    let mut line = String::new();
-    reader.read_line(&mut line).await?;
-    let line = line.trim_end();
+    let (mut r, mut w) = stream.into_split();
 
-    if let Some(addr_str) = line.strip_prefix("PUT ") {
-        match addr_str.parse::<SocketAddr>() {
-            Ok(addr) => {
-                if reg.insert(addr).await {
-                    w.write_all(b"OK\n").await?;
-                } else {
-                    w.write_all(b"FULL\n").await?;
+    let sender_ip = match r.peer_addr()? {
+        SocketAddr::V4(v4) => *v4.ip(),
+        SocketAddr::V6(_) => return Ok(()),
+    };
+
+    let mut opcode = [0u8; 1];
+    if r.read_exact(&mut opcode).await.is_err() {
+        return Ok(())
+    }
+
+    match opcode[0] {
+        // get request
+        0xAA => {
+            let mut payload = [0u8; 2];
+            if r.read_exact(&mut payload).await.is_err() {
+                return Ok(());
+            }
+
+            let port = u16::from_be_bytes(payload);
+            let requester_addr = SocketAddr::V4(SocketAddrV4::new(sender_ip, port));
+
+            let mut peers = reg.snapshot();
+            peers.retain(|a| *a != requester_addr);
+
+            let count = peers.len().min(255) as u8;
+            let mut buf = Vec::with_capacity(1 + (count as usize * 6));
+            buf.push(count);
+
+            for addr in peers {
+                if let SocketAddr::V4(v4) = addr {
+                    buf.extend_from_slice(&v4.ip().octets());
+                    buf.extend_from_slice(&v4.port().to_be_bytes());
                 }
             }
-            Err(_) => w.write_all(b"ERR bad addr\n").await?,
-        }
-    } else if line == "GET" {
-        for a in reg.snapshot().await {
-            w.write_all(format!("{a}\n").as_bytes()).await?;
-        }
-        w.write_all(b".\n").await?;
-    } else {
-        w.write_all(b"ERR\n").await?;
+            w.write_all(&buf).await?;
+        },
+
+        // put request
+        0xFF => {
+            let mut payload = [0u8; 2];
+            if r.read_exact(&mut payload).await.is_err() {
+                // silent drop, cant be helped
+                return Ok(())
+            }
+
+            let port = u16::from_be_bytes([payload[0], payload[1]]);
+            let addr = SocketAddr::V4(SocketAddrV4::new(sender_ip, port));
+
+            let status = if reg.insert(addr) { 0x01 } else { 0x00 };
+            w.write_all(&[status]).await?;
+        },
+
+        _ => w.write_all(&[0x02]).await?,
     }
 
     w.flush().await?;
     Ok(())
+}
+
+async fn registry_refresh_loop(registry: Registry) {
+    let mut tick = tokio::time::interval(PING_INTERVAL);
+    // consume first useless tick
+    tick.tick().await;
+
+    loop {
+        tick.tick().await;
+
+        let active_nodes = registry.snapshot();
+
+        let mut tasks = Vec::with_capacity(active_nodes.len());
+        for addr in active_nodes {
+            // 3 second timeout for ping return
+            tasks.push(tokio::spawn(async move {
+                let is_alive = tokio::time::timeout(PING_TIMEOUT, TcpStream::connect(addr))
+                    .await
+                    .map(|r| r.is_ok())
+                    .unwrap_or(false);
+
+                (addr, is_alive)
+            }));
+        }        
+
+        let mut evicted = 0;
+        for task in tasks {
+            if let Ok((addr, is_alive)) = task.await {
+                if !is_alive {
+                    registry.remove(addr);
+                    evicted += 1;
+                }
+            }
+        }
+
+        if evicted > 0 {
+            eprintln!(
+                "ping sweep: evicted {evicted}, {} online",
+                registry.len()
+            );
+        } else {
+            eprintln!("ping sweep: {} online", registry.len());
+        }
+    }
 }

@@ -94,4 +94,6 @@ pub enum Error {
     MaliciousPeer,
     #[error("Error, requested yarn does not exist on this pod")]
     YarnNotFound,
+    #[error("Error, Bitfield length does not match piece count")]
+    InvalidBitfieldLength,
 }

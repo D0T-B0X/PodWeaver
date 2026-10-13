@@ -4,15 +4,15 @@ PodWeaver will run on each user's system as a standalone application that can ha
 
 ## Implementation Plan
 
-PodWeaver will be implemented in several phases, each phase will be tested individually before an integration step to combine the outputs of all phases into the final product.
+PodWeaver will be developed in several phases, each phase will be tested individually before an integration step to combine the implemented sub-modules into the final product.
 
-Each phase will perform a task that does not depend on any other phase.
+Each module and sub-module will function independent of any sibling unit.
 
 ## 1: File Chunking
 
-Dividing the user given file into
+In case of a seeder, the user provided file to the PodWeaver application is subdivided into units of invariant length. This invariant length is established through a piece division algorithm that ensures total piece count remains manageable while balancing size of an inidividual piece.
 
-### 1.1: Division of files into 
+### 1.1: File Division
 
 ## 2: Connection Establishment
 

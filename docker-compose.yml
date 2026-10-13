@@ -1,40 +1,205 @@
 services:
-  pod1:
+
+  lighthouse:
     build: .
-    container_name: podweaver-pod1
-    networks: 
-      podweaver_net:
-        ipv4_address: 172.20.0.101
-    command: --id 1 --bind 0.0.0.0:8001
+    image: podweaver:latest
+    container_name: lighthouse-1
+    entrypoint: ["lighthouse"]
+    command: ["0.0.0.0:9001"]
+    networks:
+      lighthouse_net:
+        ipv4_address: 10.20.0.1
+    volumes:
+      - $HOME/tmp/shared:/shared
     healthcheck:
-      test: ["CMD", "test", "-f", "/tmp/healthy"]
-      interval: 1s
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9001' || exit 1"]
+      interval: 2s
       timeout: 1s
-      retries: 10
+      retries: 15
+      start_period: 1s
+
+  pod1:
+    image: podweaver:latest
+    container_name: podweaver-pod1
+    depends_on:
+      lighthouse: { condition: service_healthy }
+    environment:
+      - PODWEAVER_HOME=/data
+    networks:
+      podweaver_net:
+        ipv4_address: 172.31.0.101
+      lighthouse_net:
+    volumes:
+      - $HOME/tmp/shared:/shared
+      - $HOME/tmp/podweaver/pod1:/data
+    command: idle
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/20001' || exit 1"]
+      interval: 2s
+      timeout: 1s
+      retries: 15
       start_period: 1s
 
   pod2:
-    build: .
+    image: podweaver:latest
     container_name: podweaver-pod2
     depends_on:
-      pod1:
-        condition: service_healthy
-    networks: 
+      pod1: { condition: service_healthy }
+    environment:
+      - PODWEAVER_HOME=/data
+    networks:
       podweaver_net:
-        ipv4_address: 172.20.0.102
-    command: --id 2 --bind 0.0.0.0:8002 --bootstrap 172.20.0.101:8001
+        ipv4_address: 172.31.0.102
+      lighthouse_net:
+    volumes:
+      - $HOME/tmp/shared:/shared
+      - $HOME/tmp/podweaver/pod2:/data
+    command: seed /shared/test.bin
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /shared/test.bin.yarn && bash -c 'exec 3<>/dev/tcp/127.0.0.1/20001' || exit 1"]
+      interval: 2s
+      timeout: 1s
+      retries: 15
+      start_period: 1s
 
   pod3:
-    build: .
+    image: podweaver:latest
     container_name: podweaver-pod3
     depends_on:
-      pod1:
-        condition: service_healthy
-    networks: 
+      pod2: { condition: service_healthy }
+    environment:
+      - PODWEAVER_HOME=/data
+    networks:
       podweaver_net:
-        ipv4_address: 172.20.0.103
-    command: --id 3 --bind 0.0.0.0:8003 --bootstrap 172.20.0.101:8001
+        ipv4_address: 172.31.0.103
+      lighthouse_net:
+    volumes:
+      - $HOME/tmp/shared:/shared
+      - $HOME/tmp/podweaver/pod3:/data
+    command: download /shared/test.bin.yarn /shared/test3.out
+
+  pod4:
+    image: podweaver:latest
+    container_name: podweaver-pod4
+    depends_on:
+      pod2: { condition: service_healthy }
+    environment:
+      - PODWEAVER_HOME=/data
+    networks:
+      podweaver_net:
+        ipv4_address: 172.31.0.104
+      lighthouse_net:
+    volumes:
+      - $HOME/tmp/shared:/shared
+      - $HOME/tmp/podweaver/pod4:/data
+    command: download /shared/test.bin.yarn /shared/test4.out
+
+  pod5:
+    image: podweaver:latest
+    container_name: podweaver-pod5
+    depends_on:
+      pod2: { condition: service_healthy }
+    environment:
+      - PODWEAVER_HOME=/data
+    networks:
+      podweaver_net:
+        ipv4_address: 172.31.0.105
+      lighthouse_net:
+    volumes:
+      - $HOME/tmp/shared:/shared
+      - $HOME/tmp/podweaver/pod5:/data
+    command: download /shared/test.bin.yarn /shared/test5.out
+
+  pod6:
+    image: podweaver:latest
+    container_name: podweaver-pod6
+    depends_on:
+      pod2: { condition: service_healthy }
+    environment:
+      - PODWEAVER_HOME=/data
+    networks:
+      podweaver_net:
+        ipv4_address: 172.31.0.106
+      lighthouse_net:
+    volumes:
+      - $HOME/tmp/shared:/shared
+      - $HOME/tmp/podweaver/pod6:/data
+    command: download /shared/test.bin.yarn /shared/test6.out
+
+  pod7:
+    image: podweaver:latest
+    container_name: podweaver-pod7
+    depends_on:
+      pod2: { condition: service_healthy }
+    environment:
+      - PODWEAVER_HOME=/data
+    networks:
+      podweaver_net:
+        ipv4_address: 172.31.0.107
+      lighthouse_net:
+    volumes:
+      - $HOME/tmp/shared:/shared
+      - $HOME/tmp/podweaver/pod7:/data
+    command: download /shared/test.bin.yarn /shared/test7.out
+
+  pod8:
+    image: podweaver:latest
+    container_name: podweaver-pod8
+    depends_on:
+      pod2: { condition: service_healthy }
+    environment:
+      - PODWEAVER_HOME=/data
+    networks:
+      podweaver_net:
+        ipv4_address: 172.31.0.108
+      lighthouse_net:
+    volumes:
+      - $HOME/tmp/shared:/shared
+      - $HOME/tmp/podweaver/pod8:/data
+    command: download /shared/test.bin.yarn /shared/test8.out
+
+  pod9:
+    image: podweaver:latest
+    container_name: podweaver-pod9
+    depends_on:
+      pod2: { condition: service_healthy }
+    environment:
+      - PODWEAVER_HOME=/data
+    networks:
+      podweaver_net:
+        ipv4_address: 172.31.0.109
+      lighthouse_net:
+    volumes:
+      - $HOME/tmp/shared:/shared
+      - $HOME/tmp/podweaver/pod9:/data
+    command: download /shared/test.bin.yarn /shared/test9.out
+
+  pod10:
+    image: podweaver:latest
+    container_name: podweaver-pod10
+    depends_on:
+      pod2: { condition: service_healthy }
+    environment:
+      - PODWEAVER_HOME=/data
+    networks:
+      podweaver_net:
+        ipv4_address: 172.31.0.110
+      lighthouse_net:
+    volumes:
+      - $HOME/tmp/shared:/shared
+      - $HOME/tmp/podweaver/pod10:/data
+    command: download /shared/test.bin.yarn /shared/test10.out
 
 networks:
   podweaver_net:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.0.0/24
+
+  lighthouse_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.20.0.0/24
+          gateway: 10.20.0.254
