@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use crate::error::Error;
 use crate::types::Result;
 
+const DEFAULT_DOWNLOAD_PATH: &str = "downloads";
+
 pub fn save_to_disk(filename: &str, value: &[u8]) -> Result<()> {
     let filepath = find_path(filename)?;
 
@@ -50,6 +52,28 @@ pub fn read_or_create_file(filename: &str) -> Result<Vec<u8>> {
     }
 }
 
+pub fn allocate_file_space(filepath: Option<PathBuf>, filename: &str, size: u64) -> Result<PathBuf> {
+
+    let path = if let Some(path) = filepath { 
+        path 
+    } else {
+        let home = find_or_set_home()?;
+        home.join(DEFAULT_DOWNLOAD_PATH).join(filename)
+    };
+
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&path)?;
+
+    file.set_len(size)?;
+    Ok(path)
+}
+
 pub fn read_file(filename: &str) -> Result<Vec<u8>> {
     let filepath = find_path(filename)?;
     fs::read(filepath).map_err(|_| Error::FileReadFailed)
@@ -74,6 +98,7 @@ fn find_or_set_home() -> Result<PathBuf> {
 
     Ok(path)
 }
+
 fn find_path(filename: &str) -> Result<PathBuf> {
     let podweaver_home = find_or_set_home()?;
     let filepath = podweaver_home.join(filename);

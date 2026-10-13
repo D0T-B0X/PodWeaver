@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::net::SocketAddr;
 
 use crate::yarn::Yarn;
@@ -32,11 +33,16 @@ impl Bitfield {
         }
     }
 
-    pub fn from_bytes(bits: Vec<u8>, piece_count: usize) -> Self {
-        Self {
+    pub fn from_bytes(bits: Vec<u8>, piece_count: usize) -> Result<Self> {
+        let expected_bytes = piece_count.div_ceil(8);
+        if bits.len() > expected_bytes {
+            return Err(Error::InvalidBitfieldLength);
+        }
+
+        Ok(Self {
             bits,
             piece_count: piece_count as u32
-        }
+        })
     }
 
     pub fn has(&self, index: u32) -> bool {
@@ -96,6 +102,7 @@ pub struct PieceManager {
     pub piece_length: u32,
     pub total_length: u64,
     pub bitfield: Bitfield,
+    pub failed_peers: Vec<HashSet<SocketAddr>>,
     pub piece_state: Vec<PieceStatus>
 }
 
@@ -105,6 +112,7 @@ impl PieceManager {
         let piece_length = yarn.info.piece_length;
         let total_length = yarn.info.total_length;
         let bitfield = Bitfield::new(piece_count as usize);
+        let failed_peers = Vec::new();
         let piece_state= vec![PieceStatus::Missing; piece_count as usize];
         
         Ok(Self {
@@ -112,6 +120,7 @@ impl PieceManager {
             piece_length,
             total_length,
             bitfield,
+            failed_peers,
             piece_state,
         })
     }
@@ -267,7 +276,9 @@ impl PieceManager {
     }
 
     /// in case a block or piece hash fails, mark the piece as missing
-    pub fn mark_failed(&mut self, piece: u32) -> Result<()> {
+    pub fn mark_failed(&mut self, piece: u32, addr: SocketAddr) -> Result<()> {
+        self.failed_peers[piece as usize].insert(addr);
+
         match &self.piece_state[piece as usize] {
             PieceStatus::InFlight { .. } => {},
             _ => return Err(Error::InvalidFailAttempt),

@@ -1,12 +1,9 @@
-use rand::Rng;
 use std::sync::Arc;
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 
-use crate::error::Error;
 use crate::types::Result;
 use crate::types::NodeID;
-use crate::storage::disk::*;
 
 #[derive(Clone)]
 pub struct Contact {
@@ -15,12 +12,11 @@ pub struct Contact {
 }
 
 impl Contact {
-    pub async fn new(bind_addr: &str) -> Result<Self> {
-        let node_id = load_or_create_id()?;
+    pub async fn new(bind_addr: &str, id: NodeID) -> Result<Self> {
         let socket = Arc::new(UdpSocket::bind(bind_addr).await?);
 
         Ok(Self {
-            id: node_id, 
+            id, 
             socket: socket, 
         })
     }
@@ -45,34 +41,6 @@ impl Contact {
 
     pub async fn receive(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr)> {
         Ok(self.socket.recv_from(buf).await?)
-    }
-}
-
-fn load_or_create_id() -> Result<NodeID> {
-    // read the id from the file or create a new id and store it in the file
-    match read_file("node_id") {
-        Ok(extracted_id) => {
-            let id_bytes = extracted_id
-                .try_into()
-                .map_err(|_| Error::CorruptedNodeID)?;
-
-            Ok(NodeID(id_bytes))
-        },
-
-        Err(Error::FileError(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-            let mut id = [0u8; 32];
-            rand::rng().fill_bytes(&mut id);
-            save_to_disk("node_id", &id)?;
-            Ok(NodeID(id))
-        }
-
-        Err(Error::FileError(e)) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            Err(Error::UserLacksPrivileges)
-        }
-
-        _ => {
-            Err(Error::FileReadFailed)
-        }
     }
 }
 

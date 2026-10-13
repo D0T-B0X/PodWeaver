@@ -26,6 +26,10 @@ impl RuntimeManager {
         (handle, shutdown)
     }
 
+    pub async fn wait_for_tasks(self) {
+        self.spawner.wait_for_completion().await;
+    }
+
     pub fn spawner(&self) -> &TaskSpawner {
         &self.spawner
     }

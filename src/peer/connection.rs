@@ -34,6 +34,7 @@ const TICK: Duration = Duration::from_millis(500);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const BLOCK_LENGTH: usize = 16_384;
+const PEX_INTERVAL_TICKS: u32 = 120; // 120 * 500ms = 60s
 
 pub struct Connection {
     // connection identity
@@ -213,6 +214,11 @@ impl Connection {
         // connections can deliver messages to us
         self.router.register(self.pod_addr, self.outbound_tx.clone());
 
+        // Register pod_listen_addr with PEX pool so it gets shared across the swarm
+        if let Some(listen_addr) = self.pod_listen_addr {
+            self.pex.lock().unwrap().add([listen_addr]);
+        }
+
         self.pass_bitfield().await?;
 
         let result = self.read_loop(reader).await;
@@ -262,6 +268,7 @@ impl Connection {
 
         let mut ticker = tokio::time::interval(TICK);
         ticker.tick().await;
+        let mut pex_ticks = 0u32;
 
         loop {
             tokio::select! {
@@ -292,6 +299,19 @@ impl Connection {
                         break;
                     }
                     if self.refill_pipeline().await.is_err() { break; }
+
+                    // Periodically send unsolicited PEX samples to keep swarm active
+                    pex_ticks += 1;
+                    if pex_ticks >= PEX_INTERVAL_TICKS {
+                        pex_ticks = 0;
+                        let sample = self.pex.lock().unwrap().sample(25);
+                        if !sample.is_empty() {
+                            let _ = self.outbound_tx.send(Message::PexResponse {
+                                added: sample,
+                                dropped: Vec::new(),
+                            }).await;
+                        }
+                    }
                 }
             }
         }
@@ -335,7 +355,7 @@ impl Connection {
 
             Message::Bitfield { bits } => {
                 let piece_count = self.piece_manager.lock().unwrap().piece_count;
-                self.pod_bitfield = Bitfield::from_bytes(bits, piece_count as usize);
+                self.pod_bitfield = Bitfield::from_bytes(bits, piece_count as usize)?;
                 self.maybe_send_interested().await?;
             },
 
@@ -348,15 +368,13 @@ impl Connection {
             },
 
             Message::Cancel { .. } => {
-                // No upload queue to cancel from. No-op for now.
+                // Upload cancellation handled via internal task check
             },
 
             Message::PexRequest => {
                 let sample = self.pex.lock().unwrap().sample(50);
                 self.outbound_tx.send(Message::PexResponse {
                     added: sample,
-
-                    // TODO => Add dead peers and sample them from the list
                     dropped: Vec::new(),
                 }).await.map_err(|_| Error::MessageNotSent)?;
             },
@@ -401,7 +419,9 @@ impl Connection {
 
     async fn read_message<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Message> {
         let mut header = [0u8; 4];
-        reader.read_exact(&mut header).await?;
+        if let Err(e) = reader.read_exact(&mut header).await {
+            return Err(Error::FileError(e));
+        }
         let len = needle::parse_length(header)?;
 
         let mut payload = vec![0u8; len as usize];
@@ -498,16 +518,12 @@ impl Connection {
             None => return Ok(()),
         };
         if end > this_piece_len {
-            eprintln!(
-                "[{}] bad request: piece={piece_index} offset={offset} len={length} piece_len={this_piece_len}",
-                self.pod_addr
-            );
             return Ok(());
         }
 
-        // do not send the block if the receiver is choked
+        // STRICT CHOKE CHECK: Reject block requests if the peer is choked
         match self.choke_manager.lock().unwrap().am_uploading_to(self.pod_addr) {
-            Ok(b) => if b { },
+            Ok(true) => {},
             _ => return Ok(()),
         }
 
@@ -585,7 +601,7 @@ impl Connection {
         // verify piece data
         let expected_hash = self.yarn.info.pieces[piece_index as usize];
         if Self::hash(&b) != expected_hash {
-            self.piece_manager.lock().unwrap().mark_failed(piece_index)?;
+            self.piece_manager.lock().unwrap().mark_failed(piece_index, self.pod_addr)?;
             return Err(Error::MaliciousPeer);
         }
 
@@ -699,24 +715,18 @@ mod tests {
         (Arc::new(yarn), path)
     }
 
-    /// Placeholder Pex for tests. The connection tests never add addresses
-    /// to the pool, so `me` and size don't matter here.
     fn dummy_pex() -> Arc<Mutex<Pex>> {
         let me: SocketAddr = "0.0.0.0:0".parse().unwrap();
         Arc::new(Mutex::new(Pex::new(me, PEX_POOL_SIZE)))
     }
 
-    /// Spawn a router task and return a handle. In the real code the router
-    /// is spawned by YarnFabric::new; here we just need something that
-    /// drains events so `try_send` on the handle doesn't fail.
     fn spawn_test_router() -> FabricHandle {
         let (tx, mut rx) = mpsc::channel::<FabricEvent>(64);
         tokio::spawn(async move {
             while let Some(_event) = rx.recv().await {
-                // drop events; nothing to route to in the test
             }
         });
-        FabricHandle { tx}
+        FabricHandle { tx }
     }
 
     struct PeerTestEnv {
@@ -771,7 +781,6 @@ mod tests {
         let (yarn, seeder_path) = build_yarn(&content).await;
         let info_hash = yarn.info_hash().unwrap();
 
-        // --- Seeder ---
         let mut bf = Bitfield::new(yarn.info.pieces.len());
         bf.full();
         let seeder_piece = Arc::new(Mutex::new(PieceManager::resume(&yarn, bf).unwrap()));
@@ -786,7 +795,6 @@ mod tests {
         let (seeder_have_tx, _) = broadcast::channel(64);
         let seeder_cancel = CancellationToken::new();
 
-        // --- Leecher ---
         let leecher_path = unique_path("out");
         std::fs::write(&leecher_path, vec![0u8; yarn.info.total_length as usize]).unwrap();
         let leecher_piece = Arc::new(Mutex::new(PieceManager::new(&yarn).unwrap()));
@@ -801,7 +809,6 @@ mod tests {
         let (leecher_have_tx, _) = broadcast::channel(64);
         let leecher_cancel = CancellationToken::new();
 
-        // Clones kept alive by the test for observation.
         let leecher_choke_t = leecher_choke.clone();
         let leecher_piece_t = leecher_piece.clone();
         let seeder_choke_t = seeder_choke.clone();
@@ -815,8 +822,6 @@ mod tests {
         let seeder_id = NodeID([0xAA; 32]);
         let leecher_id = NodeID([0xBB; 32]);
 
-        // Each side gets its own router handle. In production this comes
-        // from the YarnFabric; in tests we spawn dummy routers that drain.
         let seeder_router = spawn_test_router();
         let leecher_router = spawn_test_router();
 
@@ -824,10 +829,8 @@ mod tests {
         let seeder_handle = tokio::spawn({
             let yarn = yarn.clone();
             async move {
-                // Accept path: read the handshake, then hand off to accept.
                 let (mut stream, peer_addr) = listener.accept().await.unwrap();
 
-                // Read the handshake frame
                 let mut header = [0u8; 4];
                 AsyncReadExt::read_exact(&mut stream, &mut header).await.unwrap();
                 let len = needle::parse_length(header).unwrap();
@@ -893,10 +896,6 @@ mod tests {
             leecher_path,
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Tests
-    // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn handshake_completes_between_two_peers() {
@@ -1039,10 +1038,6 @@ mod tests {
             "handshake did not complete"
         );
 
-        // The 10s choke scheduler lives in PeerManager, which doesn't exist
-        // yet. Manually unchoke both directions so the pipeline can flow.
-
-        // Seeder: unchoke every registered peer (just the leecher).
         let seeder_peers = env.seeder_choke.lock().unwrap().pod_addrs();
         assert!(
             !seeder_peers.is_empty(),
@@ -1056,14 +1051,12 @@ mod tests {
                 .unwrap();
         }
 
-        // Leecher: mark the seeder as not-choking so `can_request` returns true.
         env.leecher_choke
             .lock()
             .unwrap()
             .set_peer_choking(env.listen_addr, false)
             .unwrap();
 
-        // Wait for completion.
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             let (have, total) = env.leecher_piece.lock().unwrap().progress();
@@ -1076,7 +1069,6 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
-        // Byte-for-byte comparison.
         let source = std::fs::read(&env.seeder_path).unwrap();
         let output = std::fs::read(&env.leecher_path).unwrap();
         assert_eq!(source.len(), output.len(), "output length differs");

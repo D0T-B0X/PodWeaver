@@ -240,6 +240,10 @@ impl DHT {
             _ => Err(Error::UnexpectedFormat)
         }
     }
+
+    pub fn addr(&self) -> Result<SocketAddr> {
+        self.transport.addr()
+    }
 }
 
 #[cfg(test)]

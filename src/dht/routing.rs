@@ -120,7 +120,7 @@ impl RoutingTable {
     }
 }
 
-fn xor_nodes(a: &NodeID, b: &NodeID) -> [u8; 32] {
+pub fn xor_nodes(a: &NodeID, b: &NodeID) -> [u8; 32] {
     let mut out = [0u8; 32];
     for i in 0..32 {
         out[i] = a.0[i] ^ b.0[i];

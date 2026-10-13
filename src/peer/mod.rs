@@ -7,7 +7,6 @@ pub mod connection;
 
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::path::PathBuf;
 use std::time::Duration;
 use std::net::SocketAddr;
 use std::collections::HashMap;
@@ -157,7 +156,7 @@ impl YarnFabric {
     /// `output_path`. The output file must already exist at the right size.
     pub fn new(
         yarn: Arc<Yarn>,
-        output_path: PathBuf,
+        output_path: String,
         spawner: &TaskSpawner,
         my_addr: SocketAddr,
         seed: bool,
@@ -173,7 +172,7 @@ impl YarnFabric {
         };
         let choke_manager = Arc::new(Mutex::new(ChokeManager::new()));
         let spool = Spool::new(
-            output_path.to_str().ok_or(Error::UnexpectedFormat)?,
+            &output_path,
             yarn.info.piece_length as u64,
             yarn.info.total_length,
         )?;
@@ -236,17 +235,13 @@ impl YarnFabric {
         author: Option<String>,
         creation_date: Option<String>,
         comments: Option<String>,
-        source_path: PathBuf,
+        source_path: String,
         spawner: &TaskSpawner,
         my_addr: SocketAddr,
         stop: CancellationToken,
     ) -> Result<Arc<Self>> {
-        let path_str = source_path
-            .to_str()
-            .ok_or(Error::UnexpectedFormat)?
-            .to_string();
         let yarn = Arc::new(
-            Yarn::from_file(author, creation_date, comments, path_str).await?,
+            Yarn::from_file(author, creation_date, comments, source_path.clone()).await?,
         );
         Self::new(yarn, source_path, spawner, my_addr, true, stop)
     }
@@ -466,7 +461,13 @@ async fn handle_inbound(
 ) -> Result<()> {
     // Read the handshake frame so we know which yarn the peer wants.
     let mut header = [0u8; 4];
-    stream.read_exact(&mut header).await?;
+
+    if let Err(e) = stream.read_exact(&mut header).await {
+        if e.kind() == std::io::ErrorKind::UnexpectedEof {
+            return Ok(());
+        }
+        return Err(Error::FileError(e));
+    }
     let len = needle::parse_length(header)?;
 
     let mut payload = vec![0u8; len as usize];
