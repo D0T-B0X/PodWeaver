@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>PodWeaver</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-dot"></span>
+    <span>PodWeaver</span>
+  </div>
+  <div class="node-info" id="node-info">connecting…</div>
+  <div class="topbar-actions">
+    <button id="btn-seed" class="btn">Seed file</button>
+    <button id="btn-add" class="btn primary">Add Yarn</button>
+  </div>
+</header>
+
+<main id="list" class="list"></main>
+
+<template id="row-tpl">
+  <article class="row">
+    <header class="row-head">
+      <div class="row-title">
+        <span class="name"></span>
+        <span class="pill"></span>
+      </div>
+    </header>
+    <div class="row-bar">
+      <div class="bar"><div class="bar-fill"></div></div>
+      <span class="pct"></span>
+    </div>
+    <div class="row-foot">
+      <div class="meta">
+        <span class="m-hash"></span>
+        <span class="dot">·</span>
+        <span class="m-pieces"></span>
+        <span class="dot">·</span>
+        <span class="m-size"></span>
+        <span class="dot">·</span>
+        <span class="m-peers"></span>
+      </div>
+      <div class="row-actions">
+        <button class="btn small act-toggle">Pause</button>
+        <button class="btn small act-remove">Remove</button>
+      </div>
+    </div>
+    <div class="row-expand">
+      <canvas class="piece-map" height="28"></canvas>
+      <div class="map-legend">
+        <span class="lg lg-done"></span><span>complete</span>
+        <span class="lg lg-inflight"></span><span>in-flight</span>
+        <span class="lg lg-missing"></span><span>missing</span>
+        <span class="map-info"></span>
+      </div>
+    </div>
+  </article>
+</template>
+
+<script src="/main.js"></script>
+</body>
+</html>
