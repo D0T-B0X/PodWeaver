@@ -26,7 +26,7 @@ impl TaskSpawner {
         self.tracker.spawn(fut);
     }
 
-    pub async fn wait_for_completion(self) {
+    pub async fn wait_for_completion(&self) {
         self.tracker.close();
         self.tracker.wait().await;
     }
