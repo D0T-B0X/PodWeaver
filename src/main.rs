@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use pod_weaver::yarn::Yarn;
@@ -33,39 +34,50 @@ fn usage() {
 podweaver — zero-config peer engine
 
 usage:
-  podweaver seed <file>
-  podweaver download <yarn-file> [output-dir]
+  podweaver seed <file> [<file> ...]
+  podweaver download [--out <dir>] <yarn-file> [<yarn-file> ...]
   podweaver idle
 "
     );
 }
 
 async fn run_seed(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(file_str) = args.get(2) else {
-        return Err("seed: missing <file>".into());
-    };
+    let files: Vec<String> = args.iter().skip(2).cloned().collect();
+    if files.is_empty() {
+        return Err("seed: missing <file>...".into());
+    }
 
-    let source = PathBuf::from(file_str);
-    if !source.exists() {
-        return Err(format!("seed: {file_str} does not exist").into());
+    // Validate everything up front so we don't half-seed.
+    for f in &files {
+        if !PathBuf::from(f).exists() {
+            return Err(format!("seed: {f} does not exist").into());
+        }
     }
 
     let engine = Engine::new().await?;
 
-    let info_hash = engine
-        .add_yarn(None, None, None, file_str.clone())
-        .await?;
+    for file_str in &files {
+        let info_hash = engine
+            .add_yarn(None, None, None, file_str.clone())
+            .await?;
 
-    let yarn = Yarn::from_file(None, None, None, file_str.clone()).await?;
-    let yarn_path = PathBuf::from(format!("{file_str}.yarn"));
-    std::fs::write(&yarn_path, yarn.encode()?)?;
+        // Write the .yarn metadata next to the source file.
+        let yarn = Yarn::from_file(None, None, None, file_str.clone()).await?;
+        let yarn_path = PathBuf::from(format!("{file_str}.yarn"));
+        std::fs::write(&yarn_path, yarn.encode()?)?;
+
+        println!(
+            "seeding {:<24} info-hash {}",
+            file_str,
+            hex(&info_hash.0)
+        );
+        println!("yarn written: {}", yarn_path.display());
+    }
 
     println!("node-id     : {}", hex(&engine.node_id().0));
     println!("tcp listen  : {}", engine.listen_port());
     println!("dht listen  : {}", engine.dht_addr());
-    println!("info-hash   : {}", hex(&info_hash.0));
-    println!("yarn written: {}", yarn_path.display());
-    println!("seeding {file_str} — press Ctrl-C to stop");
+    println!("seeding {} file(s) — press Ctrl-C to stop", files.len());
 
     tokio::signal::ctrl_c().await?;
     engine.shutdown().await;
@@ -73,44 +85,90 @@ async fn run_seed(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn run_download(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(yarn_file) = args.get(2) else {
-        return Err("download: usage: download <yarn-file> [output-dir]".into());
+    // parse: download [--out <dir>] <yarn>...
+    let mut yarn_files: Vec<PathBuf> = Vec::new();
+    let mut output_dir: Option<PathBuf> = None;
+
+    let mut iter = args.iter().skip(2);
+    while let Some(a) = iter.next() {
+        if a == "--out" {
+            let Some(d) = iter.next() else {
+                return Err("download: --out requires a directory".into());
+            };
+            output_dir = Some(PathBuf::from(d));
+        } else {
+            yarn_files.push(PathBuf::from(a));
+        }
+    }
+
+    if yarn_files.is_empty() {
+        return Err("download: missing <yarn-file>...".into());
+    }
+
+    let resolve_output = |filename: &str| -> PathBuf {
+        match &output_dir {
+            Some(dir) => dir.join(filename),
+            None => PathBuf::from(filename),
+        }
     };
 
-    let yarn_path = PathBuf::from(yarn_file);
-    let yarn_bytes = std::fs::read(&yarn_path)?;
-    let decoded_yarn = Yarn::decode(&yarn_bytes)?;
-    let filename = decoded_yarn.info.filename.clone();
-
-    let output_dir = args.get(3).map(PathBuf::from);
-
     let engine = Engine::new().await?;
+    let cancel = engine.cancel_token();
+    
+    let mut fabrics = Vec::new();
+    for path in &yarn_files {
+        let bytes = std::fs::read(path)?;
+        let yarn = Arc::new(Yarn::decode(&bytes)?);
+        let out_path = resolve_output(&yarn.info.filename);
 
-    let fabric = engine
-        .download_yarn(yarn_bytes, output_dir, &filename)
-        .await?;
-    let piece_manager = fabric.piece_manager.clone();
-    let total_pieces = fabric.yarn.info.pieces.len() as u32;
+        let fabric = engine.download_yarn(yarn, out_path).await?;
+
+        println!(
+            "downloading {:<24} info-hash {}",
+            path.display(),
+            hex(&fabric.info_hash.0)
+        );
+        fabrics.push(fabric);
+    }
 
     println!("node-id     : {}", hex(&engine.node_id().0));
     println!("tcp listen  : {}", engine.listen_port());
-    println!("info-hash   : {}", hex(&fabric.info_hash.0));
-    println!("pieces      : {total_pieces}");
+    println!("yarns       : {}", fabrics.len());
 
-    let deadline = Instant::now() + Duration::from_secs(300);
+    let deadline = Instant::now() + Duration::from_secs(600);
+    let mut interrupted = false;
+
     loop {
-        let (have, total) = {
-            let pm = piece_manager.lock().unwrap();
-            pm.progress()
-        };
+        let mut all_done = true;
+        for f in &fabrics {
+            let (have, total) = f.piece_manager.lock().unwrap().progress();
+            if have < total {
+                all_done = false;
+                break;
+            }
+        }
+        if all_done {
+            for f in &fabrics {
+                let (have, total) = f.piece_manager.lock().unwrap().progress();
+                println!("done: {} {have}/{total}", hex(&f.info_hash.0));
+            }
+            break;
+        }
 
-        if have == total {
-            println!("done: {have}/{total} pieces downloaded");
+        if cancel.is_cancelled() {
+            for f in &fabrics {
+                let (have, total) = f.piece_manager.lock().unwrap().progress();
+                eprintln!("interrupted: {} {have}/{total}", hex(&f.info_hash.0));
+            }
+            interrupted = true;
             break;
         }
 
         if Instant::now() > deadline {
-            eprintln!("timed out at {have}/{total} pieces");
+            for f in &fabrics {
+                let (have, total) = f.piece_manager.lock().unwrap().progress();
+                eprintln!("timed out:   {} {have}/{total}", hex(&f.info_hash.0));
+            }
             engine.shutdown().await;
             std::process::exit(2);
         }
@@ -119,6 +177,10 @@ async fn run_download(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     }
 
     engine.shutdown().await;
+
+    if interrupted {
+        std::process::exit(130);
+    }
     Ok(())
 }
 
