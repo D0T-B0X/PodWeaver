@@ -6,6 +6,51 @@ PodWeaver is a decentralised peer-to-peer file-sharing platform. The application
 
 ## Build
 
+### Dependencies
+
+```
+rand = "0.10.3"
+sha2 = "0.11.0"
+thiserror = "2.0.20"
+tokio = version = "1.53.1"
+tokio-util = "0.7.19"
+axum = "0.7"
+tokio-stream = "0.1"
+serde = "1"
+serde_json = "1"
+```
+
+### Build commands
+
+```
+cargo run --bin lighthouse <bin_address>
+```
+To initialize the last choice central node discovery server
+
+Then simply:
+```
+cargo run --bin podweaver seed <file> [<file>...] // for seeds
+cargo run --bin podweaver download [--out <dir>] <yarn-file> [<yarn_file>...] // for leechers
+cargo run --bin idle // occupies space on the network, useful for testing 
+```
+
+Or, to run the UI layer
+```
+cargo run --bin podweaver-ui
+```
+
+Or, you can run a quick test by running the docker compose (needs docker and compose)
+```
+docker compose up --build -d
+```
+
+### Environment Variables
+
+ - **PODWEAVER_HOME** <application_local_store>
+ - **LIGHTHOUSE_ADDR** <static_ip_of_lighthouse>
+ - **UI_PORT** <webhost_ui_port>
+ - **DOWNLOAD_RATE** <max_bytes_per_second>
+
 
 ## Architecture
 
@@ -162,3 +207,6 @@ Not a struct, but a fixed sequence worth naming. `Engine::new` moves through `Lo
  - PodWeaver can only function on public IPs, any node behind NAT is closed off to the swarm.
  - Incase of an empty peer cache, the runtime is crippled and depends entirely on a centra bootstrap server.
 
+## AI Usage
+
+AI was used to develop the entirety of the GUI layer and discuss architectural paradigms, along with syntax support since this is my first Rust project.
