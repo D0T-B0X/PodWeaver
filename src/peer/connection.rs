@@ -72,6 +72,9 @@ pub struct Connection {
 
     // for the accept path: the handshake we already read
     pub pre_read_handshake: Option<Message>,
+
+    // rate limiter
+    rate_limiter: Option<RateLimiter>,
 }
 
 impl Connection {
@@ -171,6 +174,12 @@ impl Connection {
         let have_rx = have_tx.subscribe();
         let piece_count = yarn.info.pieces.len();
 
+        let rate_limiter = std::env::var("DOWNLOAD_RATE")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|&n| n > 0)
+            .map(RateLimiter::new);
+
         (Self {
             our_id,
             listen_port,
@@ -192,6 +201,7 @@ impl Connection {
             router,
             cancel_token,
             pre_read_handshake: None,
+            rate_limiter,
         }, stream, outbound_rx)
     }
 
@@ -221,9 +231,17 @@ impl Connection {
 
         self.pass_bitfield().await?;
 
+        // initialize gossip
+        let _ = self.outbound_tx.try_send(Message::PexRequest);
+
         let result = self.read_loop(reader).await;
 
         // cleanup
+        let mut pm = self.piece_manager.lock().unwrap();
+        for (&(piece, block), _) in &self.in_flight {
+            pm.cancel_request(piece, block, self.pod_addr);
+        }
+        self.in_flight.clear();
         self.router.unregister(self.pod_addr);
         self.choke_manager.lock().unwrap().remove_peer(self.pod_addr);
         write_task.abort();
@@ -304,11 +322,14 @@ impl Connection {
                     pex_ticks += 1;
                     if pex_ticks >= PEX_INTERVAL_TICKS {
                         pex_ticks = 0;
-                        let sample = self.pex.lock().unwrap().sample(25);
-                        if !sample.is_empty() {
+                        let (added, dropped) = {
+                            let pex = self.pex.lock().unwrap();
+                            (pex.sample(20), pex.sample_drops(20))
+                        };
+                        if !added.is_empty() || !dropped.is_empty() {
                             let _ = self.outbound_tx.send(Message::PexResponse {
-                                added: sample,
-                                dropped: Vec::new(),
+                                added,
+                                dropped,
                             }).await;
                         }
                     }
@@ -372,10 +393,14 @@ impl Connection {
             },
 
             Message::PexRequest => {
-                let sample = self.pex.lock().unwrap().sample(50);
+                let (added, dropped) = {
+                    let pex = self.pex.lock().unwrap();
+                    (pex.sample(20), pex.sample_drops(20))
+                };
+
                 self.outbound_tx.send(Message::PexResponse {
-                    added: sample,
-                    dropped: Vec::new(),
+                    added,
+                    dropped,
                 }).await.map_err(|_| Error::MessageNotSent)?;
             },
 
@@ -550,7 +575,9 @@ impl Connection {
     async fn handle_piece(&mut self, piece_index: u32, offset: u64, data: Vec<u8>) -> Result<()> {
         let block = offset / BLOCK_LENGTH as u64;
 
-        // verify offsets
+        // Always clear our own in-flight slot, even if the data is a duplicate.
+        self.in_flight.remove(&(piece_index, block as u32));
+
         let (piece_len, total_len) = {
             let m = self.piece_manager.lock().unwrap();
             (m.piece_length as u64, m.total_length)
@@ -560,15 +587,14 @@ impl Connection {
         let this_piece_len = (total_len - piece_start).min(piece_len);
         if offset >= this_piece_len { return Ok(()); }
 
-        // duplicate pieces are ignored
         if self.piece_manager.lock().unwrap().block_exists(piece_index, block) {
+            self.refill_pipeline().await?;
             return Ok(());
         }
 
         self.choke_manager.lock().unwrap()
             .record_download(self.pod_addr, data.len() as u64)?;
 
-        self.in_flight.remove(&(piece_index, block as u32));
         let record_result = {
             let mut piece_manager = self.piece_manager.lock().unwrap();
             piece_manager.record_block(piece_index, block as u32, data, self.pod_addr)
@@ -576,11 +602,13 @@ impl Connection {
 
         let (bytes, cancel) = match record_result {
             Ok(r) => r,
-            Err(Error::BlockAlreadyReceived) => return Ok(()),
+            Err(Error::BlockAlreadyReceived) => {
+                self.refill_pipeline().await?;
+                return Ok(());
+            }
             Err(e) => return Err(e),
         };
 
-        // endgame: tell the other peers who had this block in flight to stop.
         if !cancel.is_empty() {
             let block_len = self.piece_manager.lock().unwrap()
                 .block_length(piece_index, block as u32);
@@ -598,7 +626,6 @@ impl Connection {
             return Ok(());
         };
 
-        // verify piece data
         let expected_hash = self.yarn.info.pieces[piece_index as usize];
         if Self::hash(&b) != expected_hash {
             self.piece_manager.lock().unwrap().mark_failed(piece_index, self.pod_addr)?;
@@ -620,28 +647,41 @@ impl Connection {
         Ok(())
     }
 
-    async fn refill_pipeline(&mut self) -> Result<()> {        
+    async fn refill_pipeline(&mut self) -> Result<()> {
         if !self.choke_manager.lock().unwrap().am_interested(self.pod_addr)? {
             return Ok(())
         }
-
         if !self.choke_manager.lock().unwrap().can_request(self.pod_addr)? {
             return Ok(());
         }
 
         while self.in_flight.len() < MAX_IN_FLIGHT as usize {
             let (piece, block) = {
-                let piece_manager = self.piece_manager.lock().unwrap();
-                let Some(piece) = piece_manager.choose_piece(&self.pod_bitfield)
-                else { break; };
-                let Some(block) = piece_manager.choose_block(piece) else { break; };
+                let pm = self.piece_manager.lock().unwrap();
+                let endgame = pm.is_endgame();
+                let Some(piece) = pm.choose_piece(&self.pod_bitfield, endgame) else { break; };
+                let Some(block) = pm.choose_block(piece, self.pod_addr, endgame) else { break; };
                 (piece, block)
             };
 
+            if self.in_flight.contains_key(&(piece, block)) {
+                break;
+            }
+
             let (offset, length) = {
-                let piece_manager = self.piece_manager.lock().unwrap();
-                (piece_manager.block_offset(block as u64), piece_manager.block_length(piece, block))
+                let pm = self.piece_manager.lock().unwrap();
+                (pm.block_offset(block as u64), pm.block_length(piece, block))
             };
+
+            if let Some(rl) = self.rate_limiter.as_mut() {
+                if !rl.try_consume(length) {
+                    let wait = rl.time_until(length);
+                    tokio::time::sleep(wait).await;
+                    if !rl.try_consume(length) {
+                        break;
+                    }
+                }
+            }
 
             self.outbound_tx.send(Message::Request {
                 piece_index: piece,
@@ -679,6 +719,44 @@ impl Connection {
         let mut hasher = Sha256::new();
         hasher.update(bytes);
         hasher.finalize().into()
+    }
+}
+
+struct RateLimiter {
+    bytes_per_sec: u64,
+    available: f64,
+    last_refill: Instant,
+}
+
+impl RateLimiter {
+    fn new(bytes_per_sec: u64) -> Self {
+        Self {
+            bytes_per_sec,
+            available: bytes_per_sec as f64,
+            last_refill: Instant::now(),
+        }
+    }
+
+    fn try_consume(&mut self, bytes: u64) -> bool {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+        self.last_refill = now;
+        self.available = (self.available + elapsed * self.bytes_per_sec as f64)
+            .min(self.bytes_per_sec as f64);
+        if self.available >= bytes as f64 {
+            self.available -= bytes as f64;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn time_until(&self, bytes: u64) -> Duration {
+        if self.available >= bytes as f64 {
+            return Duration::ZERO;
+        }
+        let needed = bytes as f64 - self.available;
+        Duration::from_secs_f64(needed / self.bytes_per_sec as f64)
     }
 }
 

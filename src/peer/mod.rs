@@ -159,16 +159,13 @@ impl YarnFabric {
         output_path: String,
         spawner: &TaskSpawner,
         my_addr: SocketAddr,
-        seed: bool,
+        initial_bitfield: Option<Bitfield>,
         stop: CancellationToken,
     ) -> Result<Arc<Self>> {
         let info_hash = yarn.info_hash()?;
-        let piece_manager = if seed {
-            let mut bitfield = Bitfield::new(yarn.info.pieces.len());
-            bitfield.full();
-            Arc::new(Mutex::new(PieceManager::resume(&yarn, bitfield)?))
-        } else {
-            Arc::new(Mutex::new(PieceManager::new(&yarn)?))
+        let piece_manager = match initial_bitfield {
+            Some(bf) => Arc::new(Mutex::new(PieceManager::resume(&yarn, bf)?)),
+            None => Arc::new(Mutex::new(PieceManager::new(&yarn)?)),
         };
         let choke_manager = Arc::new(Mutex::new(ChokeManager::new()));
         let spool = Spool::new(
@@ -178,7 +175,7 @@ impl YarnFabric {
         )?;
         let peers = Arc::new(Mutex::new(HashSet::new()));
         let pex = Arc::new(Mutex::new(Pex::new(my_addr, MAX_PEX_BUFFER)));
-
+        
         // Have broadcast: one sender (kept in fabric), many subscribers
         // (each connection subscribes).
         let (have_tx, _) = broadcast::channel(32);
@@ -242,8 +239,10 @@ impl YarnFabric {
     ) -> Result<Arc<Self>> {
         let yarn = Arc::new(
             Yarn::from_file(author, creation_date, comments, source_path.clone()).await?,
-        );
-        Self::new(yarn, source_path, spawner, my_addr, true, stop)
+        );  
+        let mut bitfield = Bitfield::new(yarn.info.pieces.len());
+        bitfield.full();
+        Self::new(yarn, source_path, spawner, my_addr, Some(bitfield), stop)
     }
 
     pub fn contains(&self, addr: SocketAddr) -> bool {
@@ -334,6 +333,10 @@ impl PodManager {
             .insert(yarn_fabric.info_hash, yarn_fabric);
     }
 
+    pub fn remove_yarn(&self, info_hash: &InfoHash) -> Option<Arc<YarnFabric>> {
+        self.yarns.lock().unwrap().remove(info_hash)
+    }
+
     pub fn get_yarn(&self, info_hash: &InfoHash) -> Option<Arc<YarnFabric>> {
         self.yarns.lock().unwrap().get(info_hash).cloned()
     }
@@ -360,10 +363,10 @@ impl PodManager {
 
         let id = self.id;
         let listen_port = self.listen_port;
-        let stop = self.stop.clone();
+        let stop = fabric.stop.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = Connection::connect(
+            let failed = Connection::connect(
                 addr,
                 id,
                 listen_port,
@@ -378,11 +381,17 @@ impl PodManager {
                 stop,
             )
             .await
-            {
-                eprintln!("outbound {} failed: {:?}", addr, e);
-            }
+            .is_err();
 
             fabric.peers.lock().unwrap().remove(&addr);
+
+            if failed {
+                fabric.pex.lock().unwrap().remove([addr]);
+                fabric.router.broadcast(
+                    Message::PexResponse { added: Vec::new(), dropped: vec![addr] }, 
+                    None
+                );
+            }
         });
 
         Ok(())
@@ -402,11 +411,10 @@ impl PodManager {
                     let id = self.id;
                     let listen_port = self.listen_port;
                     let yarns = self.yarns.clone();
-                    let stop = self.stop.clone();
 
                     tokio::spawn(async move {
                         if let Err(e) = handle_inbound(
-                            stream, pod_addr, id, listen_port, yarns, stop,
+                            stream, pod_addr, id, listen_port, yarns,
                         ).await {
                             eprintln!("inbound {} failed: {:?}", pod_addr, e);
                         }
@@ -457,9 +465,7 @@ async fn handle_inbound(
     id: NodeID,
     listen_port: u16,
     yarns: Arc<Mutex<HashMap<InfoHash, Arc<YarnFabric>>>>,
-    stop: CancellationToken
 ) -> Result<()> {
-    // Read the handshake frame so we know which yarn the peer wants.
     let mut header = [0u8; 4];
 
     if let Err(e) = stream.read_exact(&mut header).await {
@@ -481,7 +487,6 @@ async fn handle_inbound(
         _ => return Err(Error::InvalidPodResponse),
     };
 
-    // Look up the yarn. If we're not serving this file, close.
     let fabric = {
         let map = yarns.lock().unwrap();
         map.get(&info_hash).cloned().ok_or(Error::YarnNotFound)?
@@ -492,11 +497,9 @@ async fn handle_inbound(
         if peers.len() >= MAX_CONNECTIONS {
             return Ok(());
         }
-
         peers.insert(pod_addr);
     }
 
-    // Hand off to a connection task, giving it the handshake we already read.
     let result = Connection::accept(
         stream,
         pod_addr,
@@ -511,7 +514,7 @@ async fn handle_inbound(
         fabric.pex.clone(),
         fabric.have_tx.clone(),
         fabric.router.clone(),
-        stop,
+        fabric.stop.clone(),          
     )
     .await;
 

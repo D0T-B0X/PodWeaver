@@ -148,7 +148,9 @@ impl PieceManager {
     // --------------------
 
     /// piece selection from avaialable pieces
-    pub fn choose_piece(&self, pod_bitfield: &Bitfield) -> Option<u32> {
+    pub fn choose_piece(&self, pod_bitfield: &Bitfield, endgame: bool) -> Option<u32> {
+        let mut endgame_fallback: Option<u32> = None;
+
         for (idx, status) in self.piece_state.iter().enumerate() {
             if !pod_bitfield.has(idx as u32) {
                 continue;
@@ -166,21 +168,36 @@ impl PieceManager {
                     if has_work {
                         return Some(idx as u32);
                     }
+
+                    if endgame 
+                        && endgame_fallback.is_none()
+                        && blocks.iter().any(|b| b.is_none())
+                    {
+                        endgame_fallback = Some(idx as u32);
+                    }
                 }
             }
         }
-
-        None
+            
+        endgame_fallback
     }
 
     /// block selection from missing or inflight pieces
-    pub fn choose_block(&self, piece: u32) -> Option<u32> {
+    pub fn choose_block(&self, piece: u32, us: SocketAddr, endgame: bool) -> Option<u32> {
         match &self.piece_state[piece as usize] {
             PieceStatus::Missing => Some(0), // get the first block
-            PieceStatus::InFlight { blocks, requested_from } => { 
-                blocks.iter().enumerate()
-                    .find(|(i, b)| b.is_none() && requested_from[*i].is_empty())
-                    .map(|(i, _)| i as u32)
+            PieceStatus::InFlight { blocks, requested_from } => {
+                if !endgame {
+                    blocks.iter().enumerate()
+                        .find(|(i, b)| b.is_none() && requested_from[*i].is_empty())
+                        .map(|(i, _)| i as u32)                    
+                } else {
+                    blocks.iter().enumerate()
+                        .filter(|(i, b)| b.is_none() && !requested_from[*i].contains(&us))
+                        .min_by_key(|(i, _)| requested_from[*i].len())
+                        .map(|(i, _)| i as u32)
+                }
+
             },
             PieceStatus::Complete => None,
         }
@@ -193,7 +210,10 @@ impl PieceManager {
     /// set the piece as requested so duplicate requests dont bundle up
     pub fn mark_requested(&mut self, piece: u32, block: u32, from: SocketAddr) {
         if let PieceStatus::InFlight { requested_from, .. } = &mut self.piece_state[piece as usize] {
-            requested_from[block as usize].push(from);
+            let peers = &mut requested_from[block as usize];
+            if !peers.contains(&from) {
+                peers.push(from);
+            }
             return;
         }
 
@@ -204,11 +224,10 @@ impl PieceManager {
             let mut requested_from = vec![Vec::new(); block_count];
             requested_from[block as usize].push(from);
 
-            self.piece_state[piece as usize] = PieceStatus::InFlight { 
-                blocks: vec![None; block_count], 
-                requested_from 
+            self.piece_state[piece as usize] = PieceStatus::InFlight {
+                blocks: vec![None; block_count],
+                requested_from,
             };
-            return;
         }
     }
 
@@ -414,15 +433,14 @@ mod tests {
     fn choose_piece_skips_complete_and_unavailable() {
         let y = dummy_yarn(10, 256 * 1024);
         let mut pm = PieceManager::new(&y).unwrap();
-        // set state directly for testing
         pm.piece_state[1] = PieceStatus::Complete;
         pm.bitfield.set(1);
 
         let mut pod = Bitfield::new(10);
-        pod.set(1);   // pod has piece 1, which we also have
+        pod.set(1);
         pod.set(5);
 
-        assert_eq!(pm.choose_piece(&pod), Some(5));
+        assert_eq!(pm.choose_piece(&pod, false), Some(5));
     }
 
     #[test]
@@ -430,7 +448,6 @@ mod tests {
         let y = dummy_yarn(3, 256 * 1024);
         let mut pm = PieceManager::new(&y).unwrap();
 
-        // Request every block of piece 0 from peer 1
         for b in 0..16 {
             pm.mark_requested(0, b, addr(1));
         }
@@ -439,8 +456,8 @@ mod tests {
         pod.set(0);
         pod.set(1);
 
-        // Piece 0 has no un-requested blocks. Should skip to piece 1.
-        assert_eq!(pm.choose_piece(&pod), Some(1));
+        // Piece 0 has no un-requested blocks and we're not in endgame → skip to 1.
+        assert_eq!(pm.choose_piece(&pod, false), Some(1));
     }
 
     #[test]
@@ -472,5 +489,49 @@ mod tests {
 
         let (_, cancel) = pm.record_block(0, 0, vec![0; 16_384], addr(1)).unwrap();
         assert_eq!(cancel, vec![addr(2)]);
+    }
+
+    #[test]
+    fn endgame_chooses_already_requested_block() {
+        let y = dummy_yarn(1, 256 * 1024);   // single piece, 16 blocks
+        let mut pm = PieceManager::new(&y).unwrap();
+        let mut pod = Bitfield::new(1);
+        pod.set(0);
+
+        // Request every block from peer A
+        for b in 0..16 {
+            pm.mark_requested(0, b, addr(1));
+        }
+        assert!(pm.is_endgame());            // missing = 1 <= 6
+
+        // Non-endgame: no free work → None
+        assert!(pm.choose_block(0, addr(2), false).is_none());
+
+        // Endgame: peer B can pick up the slack. All blocks have 1 requester,
+        // so min_by_key picks the earliest index.
+        assert_eq!(pm.choose_block(0, addr(2), true), Some(0));
+
+        // Peer A already requested everything → nothing more for it
+        assert!(pm.choose_block(0, addr(1), true).is_none());
+    }
+
+    #[test]
+    fn endgame_prefers_least_requested_block() {
+        let y = dummy_yarn(1, 256 * 1024);
+        let mut pm = PieceManager::new(&y).unwrap();
+        let mut pod = Bitfield::new(1);
+        pod.set(0);
+
+        // Every block requested from peer A
+        for b in 0..16 {
+            pm.mark_requested(0, b, addr(1));
+        }
+        // Block 0 is popular: peers B and C also asked for it (3 requesters)
+        pm.mark_requested(0, 0, addr(2));
+        pm.mark_requested(0, 0, addr(3));
+
+        // Peer D in endgame: block 0 has 3 requesters, everything else has 1.
+        // Should skip block 0 and pick the next-least-requested block.
+        assert_eq!(pm.choose_block(0, addr(4), true), Some(1));
     }
 }
