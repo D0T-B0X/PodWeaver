@@ -53,9 +53,9 @@ Nodes of type 1 follow the process of iterative lookups in Kademlia's DHT, while
 
 ### 2.1: Bootstrap Discovery
 
-Every node that connects to the swarm for the first time must perform a UDP ping to a DHT Bootstrap Router to query a small list of active peers.
+PodWeaver's nodes rely primarily on a `Peer Cache`, which is a collection of all nodes that the peer inhabited in its routing table before terminating its last session. On every boot, this Peer Cache is loaded in memory by application's engine initializer. These saved peers are then queried individually and all that respond are accepted into the routing table. 
 
-Upon receiving a UDP request from the node, the router returns its list of online peers. Once this one-time bootstrap discovery ping is over, the peer stores the IP of the active nodes in its own cache. Every subsequent connection with the swarm is initiated by pinging IP addresses stored in the aforementioned node cache.
+However, in the event the peer cache is empty and no viable peers can be extracted by the node, a small centralised server termed `The Lighthouse` is utilized for discovering a small set of online nodes. The lighthouse is a collection of online nodes, 20 at most, that acts as the last option for bootstrap discovery. The server is queried only in the event the peer cache fails to materialise valid peers.
 
 <p align="center">
     <img src="media/bootstrap_connection.png" alt="Bootstrap connection for new peers" />

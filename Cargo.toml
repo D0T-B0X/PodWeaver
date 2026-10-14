@@ -4,13 +4,43 @@ version = "0.1.0"
 edition = "2024"
 authors = ["DotBox"]
 
-[[bin]]
-name = "lighthouse"
-path = "src/lighthouse.rs"
+[features]
+default = []
+ui = ["dep:axum", "dep:tokio-stream"]
 
 [dependencies]
 rand = "0.10.3"
 sha2 = "0.11.0"
 thiserror = { version = "2.0.20" }
-tokio = { version = "1.53.1", features = [ "full" ] }
-tokio-util = { version = "0.7.19", features = [ "full" ] }
+
+tokio = { version = "1.53.1", features = [
+    "rt",
+    "rt-multi-thread",
+    "net",
+    "io-util",
+    "sync",
+    "time",
+    "signal",
+    "macros",
+] }
+
+tokio-util = { version = "0.7.19", default-features = false, features = ["rt"] }
+
+axum = { version = "0.7", optional = true, default-features = false, features = ["json", "tokio", "http1"] }
+tokio-stream = { version = "0.1", optional = true, default-features = false, features = ["time"] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[[bin]]
+name = "pod_weaver"
+path = "src/main.rs"
+
+[[bin]]
+name = "lighthouse"
+path = "src/bin/lighthouse.rs"
+
+[[bin]]
+name = "podweaver-ui"
+path = "src/bin/ui.rs"
+required-features = ["ui"]
