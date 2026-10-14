@@ -7,8 +7,8 @@ services:
     entrypoint: ["lighthouse"]
     command: ["0.0.0.0:9001"]
     networks:
-      lighthouse_net:
-        ipv4_address: 10.20.0.1
+      podweaver_net:
+        ipv4_address: 10.99.0.2
     volumes:
       - $HOME/tmp/shared:/shared
     healthcheck:
@@ -21,185 +21,112 @@ services:
   pod1:
     image: podweaver:latest
     container_name: podweaver-pod1
+    entrypoint: ["podweaver-ui"]
     depends_on:
       lighthouse: { condition: service_healthy }
     environment:
       - PODWEAVER_HOME=/data
+      - LIGHTHOUSE_ADDR=10.99.0.2:9001
+      - UI_PORT=8080
+      - DOWNLOAD_RATE=500000
     networks:
       podweaver_net:
-        ipv4_address: 172.31.0.101
-      lighthouse_net:
+        ipv4_address: 10.99.0.3
     volumes:
       - $HOME/tmp/shared:/shared
       - $HOME/tmp/podweaver/pod1:/data
-    command: idle
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/20001' || exit 1"]
       interval: 2s
       timeout: 1s
       retries: 15
       start_period: 1s
+    ports:
+      - "8081:8080"
 
   pod2:
     image: podweaver:latest
     container_name: podweaver-pod2
+    entrypoint: ["podweaver-ui"]
     depends_on:
       pod1: { condition: service_healthy }
     environment:
       - PODWEAVER_HOME=/data
+      - LIGHTHOUSE_ADDR=10.99.0.2:9001
+      - UI_PORT=8080
+      - DOWNLOAD_RATE=500000
     networks:
       podweaver_net:
-        ipv4_address: 172.31.0.102
-      lighthouse_net:
+        ipv4_address: 10.99.0.4
     volumes:
       - $HOME/tmp/shared:/shared
       - $HOME/tmp/podweaver/pod2:/data
-    command: seed /shared/test.bin
-    healthcheck:
-      test: ["CMD-SHELL", "test -f /shared/test.bin.yarn && bash -c 'exec 3<>/dev/tcp/127.0.0.1/20001' || exit 1"]
-      interval: 2s
-      timeout: 1s
-      retries: 15
-      start_period: 1s
+    ports:
+      - "8082:8080"
 
   pod3:
     image: podweaver:latest
     container_name: podweaver-pod3
+    entrypoint: ["podweaver-ui"]
     depends_on:
-      pod2: { condition: service_healthy }
+      pod1: { condition: service_healthy }
     environment:
       - PODWEAVER_HOME=/data
+      - LIGHTHOUSE_ADDR=10.99.0.2:9001
+      - UI_PORT=8080
+      - DOWNLOAD_RATE=500000
     networks:
       podweaver_net:
-        ipv4_address: 172.31.0.103
-      lighthouse_net:
+        ipv4_address: 10.99.0.5
     volumes:
       - $HOME/tmp/shared:/shared
       - $HOME/tmp/podweaver/pod3:/data
-    command: download /shared/test.bin.yarn /shared/test3.out
+    ports:
+      - "8083:8080"
 
   pod4:
     image: podweaver:latest
     container_name: podweaver-pod4
+    entrypoint: ["podweaver-ui"]
     depends_on:
-      pod2: { condition: service_healthy }
+      pod1: { condition: service_healthy }
     environment:
       - PODWEAVER_HOME=/data
+      - LIGHTHOUSE_ADDR=10.99.0.2:9001
+      - UI_PORT=8080
+      - DOWNLOAD_RATE=500000
     networks:
       podweaver_net:
-        ipv4_address: 172.31.0.104
-      lighthouse_net:
+        ipv4_address: 10.99.0.6
     volumes:
       - $HOME/tmp/shared:/shared
       - $HOME/tmp/podweaver/pod4:/data
-    command: download /shared/test.bin.yarn /shared/test4.out
+    ports:
+      - "8084:8080"
 
   pod5:
     image: podweaver:latest
     container_name: podweaver-pod5
+    entrypoint: ["podweaver-ui"]
     depends_on:
-      pod2: { condition: service_healthy }
+      pod1: { condition: service_healthy }
     environment:
       - PODWEAVER_HOME=/data
+      - LIGHTHOUSE_ADDR=10.99.0.2:9001
+      - UI_PORT=8080
+      - DOWNLOAD_RATE=500000
     networks:
       podweaver_net:
-        ipv4_address: 172.31.0.105
-      lighthouse_net:
+        ipv4_address: 10.99.0.7
     volumes:
       - $HOME/tmp/shared:/shared
       - $HOME/tmp/podweaver/pod5:/data
-    command: download /shared/test.bin.yarn /shared/test5.out
-
-  pod6:
-    image: podweaver:latest
-    container_name: podweaver-pod6
-    depends_on:
-      pod2: { condition: service_healthy }
-    environment:
-      - PODWEAVER_HOME=/data
-    networks:
-      podweaver_net:
-        ipv4_address: 172.31.0.106
-      lighthouse_net:
-    volumes:
-      - $HOME/tmp/shared:/shared
-      - $HOME/tmp/podweaver/pod6:/data
-    command: download /shared/test.bin.yarn /shared/test6.out
-
-  pod7:
-    image: podweaver:latest
-    container_name: podweaver-pod7
-    depends_on:
-      pod2: { condition: service_healthy }
-    environment:
-      - PODWEAVER_HOME=/data
-    networks:
-      podweaver_net:
-        ipv4_address: 172.31.0.107
-      lighthouse_net:
-    volumes:
-      - $HOME/tmp/shared:/shared
-      - $HOME/tmp/podweaver/pod7:/data
-    command: download /shared/test.bin.yarn /shared/test7.out
-
-  pod8:
-    image: podweaver:latest
-    container_name: podweaver-pod8
-    depends_on:
-      pod2: { condition: service_healthy }
-    environment:
-      - PODWEAVER_HOME=/data
-    networks:
-      podweaver_net:
-        ipv4_address: 172.31.0.108
-      lighthouse_net:
-    volumes:
-      - $HOME/tmp/shared:/shared
-      - $HOME/tmp/podweaver/pod8:/data
-    command: download /shared/test.bin.yarn /shared/test8.out
-
-  pod9:
-    image: podweaver:latest
-    container_name: podweaver-pod9
-    depends_on:
-      pod2: { condition: service_healthy }
-    environment:
-      - PODWEAVER_HOME=/data
-    networks:
-      podweaver_net:
-        ipv4_address: 172.31.0.109
-      lighthouse_net:
-    volumes:
-      - $HOME/tmp/shared:/shared
-      - $HOME/tmp/podweaver/pod9:/data
-    command: download /shared/test.bin.yarn /shared/test9.out
-
-  pod10:
-    image: podweaver:latest
-    container_name: podweaver-pod10
-    depends_on:
-      pod2: { condition: service_healthy }
-    environment:
-      - PODWEAVER_HOME=/data
-    networks:
-      podweaver_net:
-        ipv4_address: 172.31.0.110
-      lighthouse_net:
-    volumes:
-      - $HOME/tmp/shared:/shared
-      - $HOME/tmp/podweaver/pod10:/data
-    command: download /shared/test.bin.yarn /shared/test10.out
+    ports:
+      - "8085:8080"
 
 networks:
   podweaver_net:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.31.0.0/24
-
-  lighthouse_net:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 10.20.0.0/24
-          gateway: 10.20.0.254
+        - subnet: 10.99.0.0/24
